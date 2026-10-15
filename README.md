@@ -51,8 +51,7 @@ subprocess and asserts the agent-facing contract — bounded outputs,
 guidance-not-traceback errors, exit codes, embedded-JSON extraction, and
 per-path batch semantics.
 
-## Status
+## License
 
-v1.7.1. Evolved v1.5.0 → v1.7.1 through a multi-model benchmark
-(strong/weak tiers, natural vs explicit skill triggering); every iteration was
-driven by an observed failure mode with a regression guard.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) —
+choose either at your option.

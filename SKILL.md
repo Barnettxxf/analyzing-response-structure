@@ -15,7 +15,7 @@ description: >-
   without flooding context. Skip for small config files.
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
-  version: "1.7.1"
+  version: "1.7.2"
   origin: port of viber parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
@@ -73,7 +73,7 @@ $.data.items[-1].shop_info.seller_name
 
 UTF-8 (BOM tolerated). File lines run first, then any `-p` flags. Total output caps at 80K chars — in `read` list mode ok-results beyond the first 30 come back `"omitted": true` with `value: null`; `describe` caps by size, subtrees past the budget return `"omitted": true` with `describe: null` (split the list across calls, don't raise limits).
 
-`<skill_dir>` = this skill's base directory; absolute fallback `C:\Users\Administrator\.agents\skills\analyzing-response-structure\scripts\inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits.
+`<skill_dir>` = this skill's base directory; absolute fallback `~/.agents/skills/analyzing-response-structure/scripts/inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits.
 
 ## Output Contract
 
