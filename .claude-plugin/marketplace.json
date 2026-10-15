@@ -1,0 +1,11 @@
+{
+  "name": "analyzing-response-structure",
+  "owner": { "name": "Barnett Xu" },
+  "plugins": [
+    {
+      "name": "analyzing-response-structure",
+      "source": "./",
+      "description": "Bounded structure inspection of captured HTTP responses (JSON/HTML): describe/read/batch CLI, decode notation, stdlib-only Python 3.9+."
+    }
+  ]
+}

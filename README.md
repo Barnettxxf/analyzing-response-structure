@@ -12,6 +12,17 @@ Copy this directory into your runtime's skills directory, e.g.
 `~/.agents/skills/analyzing-response-structure/`. Requires Python 3.9+
 (stdlib only, offline, read-only).
 
+The repo root **is** the skill directory (`SKILL.md` at root), so cloning
+straight into the skills directory works everywhere:
+
+| Runtime | Install |
+|---|---|
+| Claude Code (marketplace) | `/plugin marketplace add Barnettxxf/analyzing-response-structure` then `/plugin install analyzing-response-structure@analyzing-response-structure` |
+| Claude Code (manual) | `git clone https://github.com/Barnettxxf/analyzing-response-structure ~/.claude/skills/analyzing-response-structure` |
+| Codex CLI | `git clone https://github.com/Barnettxxf/analyzing-response-structure ~/.agents/skills/analyzing-response-structure` |
+| Gemini CLI / Copilot CLI | same as Codex (`~/.agents/skills/` is the cross-runtime alias) |
+| DSH (DeepSeek Harness) | same as Codex — `~/.agents/skills/` is scanned live, no restart needed |
+
 ## Usage
 
 ```bash
