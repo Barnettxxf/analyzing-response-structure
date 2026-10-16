@@ -373,62 +373,92 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(json.loads(res.stdout), {"a": 1})  # one path = plain slice, no envelope
 
-    # --- select (CSS over HTML; optional parsel dependency) -------------------
+    # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_count_and_default_matches(self):
-        res = run("select", str(self.html_page), ".price")
+    def test_read_xpath_envelope(self):
+        res = run("read", str(self.html_page), "-x", '//li[contains(@class, "price")]')
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 3)
         self.assertEqual([m["text"] for m in payload["matches"]], ["$1", "$2", "$3"])
         self.assertEqual(payload["matches"][0]["tag"], "li")
-        self.assertIn("class", payload["matches"][0]["attrs"])
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_attr_values(self):
-        res = run("select", str(self.html_page), "a", "--attr", "href")
+    def test_read_xpath_attr_values(self):
+        res = run("read", str(self.html_page), "-x", "//a", "--attr", "href")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
-        self.assertEqual(payload["count"], 2)
         self.assertEqual(payload["values"], ["/p/1", "/p/2"])
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_html_and_text_modes(self):
-        html_mode = json.loads(run("select", str(self.html_page), ".card", "--html").stdout)
-        self.assertIn("<h2>Card A</h2>", html_mode["values"][0])
-        text_mode = json.loads(run("select", str(self.html_page), ".card", "--text").stdout)
-        self.assertEqual(text_mode["values"], ["Card A", "Card B"])
+    def test_read_xpath_invalid_expression_is_guidance(self):
+        res = run("read", str(self.html_page), "-x", '//a[@href=')  # malformed XPath
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("XPath error", res.stdout)
+        self.assertNotIn("Traceback", res.stdout)
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_value_truncation(self):
+    def test_read_xpath_text_and_html_modes(self):
+        text_mode = json.loads(
+            run("read", str(self.html_page), "-x", '//div[@class="card"]', "--text").stdout
+        )
+        self.assertEqual(text_mode["values"], ["Card A", "Card B"])
+        html_mode = json.loads(
+            run("read", str(self.html_page), "-x", '//div[@class="card"]/h2', "--html").stdout
+        )
+        self.assertIn("<h2>Card A</h2>", html_mode["values"][0])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_xpath_value_truncation(self):
         long_val = self.dir / "long.html"
         long_val.write_text('<p class="t">' + "x" * 2000 + "</p>", encoding="utf-8")
-        res = run("select", str(long_val), ".t", "--text")
+        res = run("read", str(long_val), "-x", '//p[@class="t"]', "--text")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertTrue(payload["values"][0].endswith("...[truncated]"))
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_json_path_html_string(self):
+    def test_read_xpath_json_container_composition(self):
         dump = self.dir / "wrapped.json"
         dump.write_text(json.dumps({"html": "<b>bold</b><i>it</i>"}), encoding="utf-8")
-        res = run("select", str(dump), "b", "--json-path", "$.html")
+        res = run("read", str(dump), "-x", "//b", "-p", "$.html")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["matches"][0]["tag"], "b")
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_select_on_json_file_needs_json_path(self):
-        res = run("select", str(self.json_file), ".price")
+    def test_read_xpath_on_json_file_needs_container(self):
+        res = run("read", str(self.json_file), "-x", "//b")
         self.assertEqual(res.returncode, 1)
         self.assertIn("parsed as JSON", res.stdout)
         self.assertNotIn("Traceback", res.stdout)
 
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_extraction_flags_require_xpath(self):
+        res = run("read", str(self.html_page), "--text")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("-x", res.stdout)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_describe_xpath_matches(self):
+        res = run("describe", str(self.html_page), "-x", '//div[@class="card"]')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        paths = {e["path"] for e in payload["entries"]}
+        self.assertIn("$.matches[0].tag", paths)
+        self.assertIn("$.matches[0].text", paths)  # describe expands [0] of lists by convention
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_describe_xpath_on_json_needs_container(self):
+        res = run("describe", str(self.json_file), "-x", "//b")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("parsed as JSON", res.stdout)
+
     @unittest.skipIf(HAVE_PARSEL, "parsel installed — guidance path not exercised")
-    def test_select_missing_dependency_guidance(self):
-        res = run("select", str(self.html_page), ".price")
+    def test_xpath_missing_dependency_guidance(self):
+        res = run("read", str(self.html_page), "-x", "//a")
         self.assertEqual(res.returncode, 1)
         self.assertIn("pip install parsel", res.stdout)
         self.assertNotIn("Traceback", res.stdout)

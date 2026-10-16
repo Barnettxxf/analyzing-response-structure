@@ -448,6 +448,10 @@ def describe_data(sample_path: str | Path, *, json_path: str = "") -> dict[str, 
         found, sample = _select_json_path(sample, json_path)
         if not found:
             return {"error": sample, "entries": [], "truncated": False}
+    return _describe_value(sample, json_path or "$")
+
+
+def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
     state: dict[str, Any] = {
         "truncated": False,
         "stop": False,
@@ -457,7 +461,6 @@ def describe_data(sample_path: str | Path, *, json_path: str = "") -> dict[str, 
         "annotations": {},
     }
     entries: list[dict[str, Any]] = []
-    root_path = json_path or "$"
     _walk_digest(root_path, sample, entries, depth=0, state=state)
     summary: dict[str, Any] = (
         {"shape": "text", "sample": sample[:MAX_LEAF_SAMPLE]}
@@ -587,99 +590,58 @@ def batch_describe_data(sample_path: str | Path, paths: list[str]) -> dict:
     return {"file": str(sample_path), "count": len(results), "results": results}
 
 
-# --- select (CSS over HTML; optional parsel dependency) --------------------------
+# --- -x channel (XPath over HTML; optional parsel dependency) ---------------------
 
 
 SELECT_MATCH_SHOW = 30
 
 
-def _select_install_hint() -> str:
+def _xpath_install_hint() -> str:
     return (
-        "select needs the optional dependency parsel for this interpreter — "
+        "the -x channel needs the optional dependency parsel for this interpreter — "
         f"run: {sys.executable} -m pip install parsel"
     )
 
 
-def select_data(
-    sample_path: str | Path,
-    selector: str,
-    *,
-    json_path: str = "",
-    attr: str | None = None,
-    want_text: bool = False,
-    want_html: bool = False,
-    limit: int,
-) -> dict[str, Any] | None:
-    """CSS-select over HTML with count-first bounded output.
+def _xpath_matches(sample: Any, xpath: str, container: str):
+    """Resolve the HTML source then run one XPath expression.
 
-    Returns None when the optional parsel dependency is missing (caller prints
-    the install hint); otherwise an envelope honouring the batch caps: total
-    match count, first SELECT_MATCH_SHOW matches/values, per-value ``limit``.
+    ``container`` is an optional $-path addressing an HTML string inside a JSON
+    capture. Returns ``(matches, error)``: ``matches`` is None when the optional
+    parsel dependency is missing (caller prints the install hint); ``error`` is
+    a guidance dict for unusable sources.
     """
     try:
         from parsel import Selector
     except ImportError:
-        return None
-    sample = _load_sample(sample_path)
-    if json_path:
-        found, node = _select_json_path(sample, json_path)
+        return None, None
+    if container:
+        found, node = _select_json_path(sample, container)
         if not found:
-            return {"error": _bounded_text(node, 400)}
+            return None, {"error": _bounded_text(node, 400)}
         if not isinstance(node, str):
-            return {
+            return None, {
                 "error": (
-                    f"{json_path} resolved to {_json_type_name(node)}, not a string — "
-                    "select needs an HTML string (point --json-path at an HTML field)"
+                    f"{container} resolved to {_json_type_name(node)}, not a string — "
+                    "the -x container must be an HTML string field"
                 )
             }
         html = node
     elif isinstance(sample, str):
         html = sample
     else:
-        return {
+        return None, {
             "error": (
-                f"{sample_path} parsed as JSON — select needs HTML; pass -p/--json-path "
-                "pointing at an HTML string field, or use describe/read"
+                "parsed as JSON — the -x channel needs HTML; pair -x with a single "
+                "-p pointing at an HTML string field, or use describe/read"
             )
         }
-    matches = Selector(text=html).css(selector)
-    total = len(matches)
-    shown = matches[:SELECT_MATCH_SHOW]
-
-    def text_of(m) -> str:
-        return " ".join(" ".join(m.css("::text").getall()).split())
-
-    def bounded(s: str) -> str:
-        return _bounded_text(s, limit)
-
-    if attr is not None:
-        values = [bounded(m.attrib.get(attr, "")) for m in shown]
-    elif want_html:
-        values = [bounded(m.get() or "") for m in shown]
-    elif want_text:
-        values = [bounded(text_of(m)) for m in shown]
-    else:
-        values = None
-    payload: dict[str, Any] = {
-        "file": str(sample_path),
-        "selector": selector,
-        "count": total,
-        "shown": len(shown),
-        "omitted": total - len(shown),
-    }
-    if values is not None:
-        payload["values"] = values
-    else:
-        payload["matches"] = [
-            {
-                "index": index,
-                "tag": m.root.tag,
-                "attrs": dict(m.root.attrib),
-                "text": bounded(text_of(m)),
-            }
-            for index, m in enumerate(shown)
-        ]
-    return payload
+    try:
+        matches = Selector(text=html).xpath(xpath)
+    except ValueError as exc:
+        message = str(exc).replace("XPath error: ", "")
+        return None, {"error": f"XPath error: {message} — check the expression (see --help for examples)"}
+    return matches, None
 
 
 # --- CLI -------------------------------------------------------------------------
@@ -721,33 +683,30 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_describe = sub.add_parser(
         "describe", aliases=["batch_describe"],
-        help="bounded path->type->sample map: whole file, one subtree, or a whole path list")
+        help="bounded path->type->sample map: whole file, one subtree, a path list, or XPath over HTML")
     p_describe.add_argument("file", help="response file (JSON or HTML)")
     p_describe.add_argument("-p", "--json-path", action="append", nargs="*", default=[],
                             help="one or more subtree json_paths per occurrence; repeatable")
+    p_describe.add_argument("-x", "--xpath", default="",
+                            help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)")
     p_describe.add_argument("--paths-file", default=None,
                             help="text file with one json_path per line (# comments and blank lines allowed)")
     p_read = sub.add_parser(
         "read", aliases=["batch", "batch_read"],
-        help="bounded slice of one subtree, or per-path values for a whole path list")
+        help="bounded slice of one subtree, per-path values for a path list, or XPath matches over HTML")
     p_read.add_argument("file", help="response file (JSON or HTML)")
     p_read.add_argument("-p", "--json-path", action="append", nargs="*", default=[],
                         help="one or more json_paths per occurrence; repeatable")
+    p_read.add_argument("-x", "--xpath", default="",
+                        help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)")
     p_read.add_argument("--paths-file", default=None,
                         help="text file with one json_path per line (# comments and blank lines allowed)")
+    x_group = p_read.add_mutually_exclusive_group()
+    x_group.add_argument("--attr", default=None, help="with -x: extract this attribute from every match")
+    x_group.add_argument("--text", action="store_true", help="with -x: extract each match's text content")
+    x_group.add_argument("--html", action="store_true", help="with -x: extract each match's outer HTML")
     p_read.add_argument("--limit", default=None,
                         help=f"max characters per result (single mode default {DEFAULT_READ_LIMIT}; list mode default {BATCH_VALUE_LIMIT}; 1..{MAX_READ_SAMPLE_CHARS})")
-    p_select = sub.add_parser("select", help="CSS-select over HTML (count-first bounded output; optional parsel dependency)")
-    p_select.add_argument("file", help="HTML file, or a JSON capture paired with --json-path")
-    p_select.add_argument("selector", help="CSS selector")
-    p_select.add_argument("--json-path", default="",
-                          help="optional: address an HTML string field inside a JSON capture")
-    sel_group = p_select.add_mutually_exclusive_group()
-    sel_group.add_argument("--attr", default=None, help="extract this attribute from every match")
-    sel_group.add_argument("--text", action="store_true", help="extract each match's text content")
-    sel_group.add_argument("--html", action="store_true", help="extract each match's outer HTML")
-    p_select.add_argument("--limit", default=None,
-                          help=f"max characters per value (default {BATCH_VALUE_LIMIT})")
     args = parser.parse_args(argv)
 
     path = Path(args.file)
@@ -757,6 +716,35 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in ("describe", "batch_describe"):
             legacy_batch = args.command == "batch_describe"
+            if args.xpath:
+                if legacy_batch:
+                    print("[inspect_sample] the -x channel is a plain `describe` feature — batch aliases do not carry it")
+                    return 1
+                containers = _gather_paths(args)
+                if len(containers) > 1:
+                    print("[inspect_sample] the -x channel takes at most one -p container path")
+                    return 1
+                sample = _load_sample(path)
+                matches, err = _xpath_matches(sample, args.xpath, containers[0] if containers else "")
+                if matches is None and err is None:
+                    print(f"[inspect_sample] {_xpath_install_hint()}")
+                    return 1
+                if err is not None:
+                    print(json.dumps(err, ensure_ascii=False))
+                    return 1
+                jsonified = [
+                    {
+                        "tag": getattr(m.root, "tag", "#text"),
+                        "attrs": dict(getattr(m.root, "attrib", {})),
+                        "text": _bounded_text(" ".join(" ".join(m.css("::text").getall()).split()), BATCH_VALUE_LIMIT),
+                    }
+                    for m in matches[:SELECT_MATCH_SHOW]
+                ]
+                print(json.dumps(
+                    _describe_value({"count": len(matches), "matches": jsonified}, "$"),
+                    ensure_ascii=False,
+                ))
+                return 0
             paths = _gather_paths(args)
             if not paths:
                 if legacy_batch:
@@ -771,6 +759,72 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command in ("read", "batch", "batch_read"):
             legacy_batch = args.command != "read"
+            if args.attr is not None or args.text or args.html:
+                if not args.xpath:
+                    print("[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x")
+                    return 1
+                if legacy_batch:
+                    print("[inspect_sample] the -x channel is a plain `read` feature — batch aliases do not carry it")
+                    return 1
+            if args.xpath:
+                containers = _gather_paths(args)
+                if len(containers) > 1:
+                    print("[inspect_sample] the -x channel takes at most one -p container path")
+                    return 1
+                limit = BATCH_VALUE_LIMIT
+                if args.limit is not None:
+                    try:
+                        limit = int(str(args.limit).strip())
+                    except ValueError:
+                        print("[read_sample] limit must be a positive integer")
+                        return 1
+                sample = _load_sample(path)
+                matches, err = _xpath_matches(sample, args.xpath, containers[0] if containers else "")
+                if matches is None and err is None:
+                    print(f"[inspect_sample] {_xpath_install_hint()}")
+                    return 1
+                if err is not None:
+                    print(json.dumps(err, ensure_ascii=False))
+                    return 1
+                total = len(matches)
+                shown = matches[:SELECT_MATCH_SHOW]
+
+                def text_of(m) -> str:
+                    root = m.root
+                    if isinstance(root, str) or not hasattr(root, "tag"):
+                        return " ".join(str(root).split())
+                    return " ".join(" ".join(m.css("::text").getall()).split())
+
+                def bounded(s: str) -> str:
+                    return _bounded_text(s, limit)
+
+                if args.attr is not None:
+                    values = [bounded(m.attrib.get(args.attr, "")) for m in shown]
+                elif args.html:
+                    values = [bounded(m.get() or "") for m in shown]
+                else:
+                    values = [bounded(text_of(m)) for m in shown]
+                payload: dict[str, Any] = {
+                    "file": str(path),
+                    "xpath": args.xpath,
+                    "count": total,
+                    "shown": len(shown),
+                    "omitted": total - len(shown),
+                }
+                if args.attr is not None or args.text or args.html:
+                    payload["values"] = values
+                else:
+                    payload["matches"] = [
+                        {
+                            "index": index,
+                            "tag": getattr(m.root, "tag", "#text"),
+                            "attrs": dict(getattr(m.root, "attrib", {})),
+                            "text": bounded(text_of(m)),
+                        }
+                        for index, m in enumerate(shown)
+                    ]
+                print(json.dumps(payload, ensure_ascii=False))
+                return 0
             paths = _gather_paths(args)
             if args.limit is None:
                 limit = BATCH_VALUE_LIMIT if (legacy_batch or len(paths) > 1) else DEFAULT_READ_LIMIT
@@ -803,37 +857,6 @@ def main(argv: list[str] | None = None) -> int:
                         if kept > 30:
                             r["omitted"] = True
                             r["value"] = None
-                blob = json.dumps(payload, ensure_ascii=False)
-            print(blob)
-            return 0
-        if args.command == "select":
-            limit = BATCH_VALUE_LIMIT
-            if args.limit is not None:
-                try:
-                    limit = int(str(args.limit).strip())
-                except ValueError:
-                    print("[read_sample] limit must be a positive integer")
-                    return 1
-            payload = select_data(
-                path,
-                args.selector,
-                json_path=args.json_path,
-                attr=args.attr,
-                want_text=args.text,
-                want_html=args.html,
-                limit=limit,
-            )
-            if payload is None:
-                print(f"[inspect_sample] {_select_install_hint()}")
-                return 1
-            if "error" in payload:
-                print(json.dumps(payload, ensure_ascii=False))
-                return 1
-            blob = json.dumps(payload, ensure_ascii=False)
-            if len(blob) > BATCH_TOTAL_CHARS and payload.get("matches"):
-                for entry in payload["matches"][10:]:
-                    entry["text"] = None
-                    entry["omitted"] = True
                 blob = json.dumps(payload, ensure_ascii=False)
             print(blob)
             return 0

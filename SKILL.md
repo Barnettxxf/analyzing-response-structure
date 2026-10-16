@@ -15,7 +15,7 @@ description: >-
   without flooding context. Skip for small config files.
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
-  version: "1.8.0"
+  version: "1.9.0"
   origin: port of viber parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
@@ -24,7 +24,7 @@ metadata:
 
 ## Overview
 
-Never guess what a response contains — observe it. `inspect_sample.py` reads captured files with bounded offline operations: `describe` prints a path→type→sample map; `read` slices one subtree or resolves a path list into values (each accepts one path or a whole path list); `select` runs CSS selectors over HTML (optional parsel dependency). Map first, slice second, inventory last; even a 2 MB response stays out of context.
+Never guess what a response contains — observe it. `inspect_sample.py` reads captured files with bounded offline operations: `describe` prints a path→type→sample map; `read` slices one subtree or resolves a path list into values; both accept `-p` (JSON paths) and `-x` (XPath over HTML — optional parsel dependency). Map first, slice second, inventory last; even a 2 MB response stays out of context.
 
 ## When to Use — run it BEFORE:
 
@@ -38,7 +38,7 @@ Skip: small config files — a direct read is cheaper.
 
 ## Requirements
 
-Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-specified). On SyntaxError/version errors switch or ask. Exception: `select` (CSS over HTML) uses the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; every other operation stays stdlib-only.
+Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-specified). On SyntaxError/version errors switch or ask. Exception: the `-x` channel (XPath over HTML) uses the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; every other operation stays stdlib-only.
 
 ## Core Pattern
 
@@ -60,7 +60,7 @@ python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.data.items[0]'
 python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.code' -p '$.data.items[0].title' -p '$.data.items[-1].shop_info.seller_name'
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --json-path '$#script[0].props' --limit 2000
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --paths-file paths.txt
-python <skill_dir>/scripts/inspect_sample.py select '<file>' 'table.product tr' --attr href
+python <skill_dir>/scripts/inspect_sample.py read '<file>' -x '//tr[@class="product"]' --attr href
 ```
 
 Every command takes one path or a whole list: a single `-p/--json-path` returns that one bounded result; several paths (repeatable `-p`, several paths after one `-p`, or `--paths-file`) return per-path results `{path, ok, ...}` in one call — `read` yields `{path, ok, type, value}` (per-value cap 600 chars in list mode, `--limit` overrides), `describe` yields a full bounded map per path. Paths file format:
@@ -74,7 +74,7 @@ $.data.items[-1].shop_info.seller_name
 
 UTF-8 (BOM tolerated). File lines run first, then any `-p` flags. Total output caps at 80K chars — in `read` list mode ok-results beyond the first 30 come back `"omitted": true` with `value: null`; `describe` caps by size, subtrees past the budget return `"omitted": true` with `describe: null` (split the list across calls, don't raise limits).
 
-`select '<css>'` runs CSS selectors over HTML — server-rendered pages, or an HTML string inside a JSON capture via `--json-path`. Count-first: the envelope reports `count` and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `#script[n]` JSON mode never needs it.
+The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML string inside a JSON capture via one `-p` container (`read '<file>' -x '//b' -p '$.html'`). XPath is the only DOM selector offered (parsel/lxml: axes, `contains()`, `text()` nodes — a superset of CSS). Count-first: the envelope reports `count` and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `-p`/`#script[n]` JSON modes never need it.
 
 `<skill_dir>` = this skill's base directory; absolute fallback `~/.agents/skills/analyzing-response-structure/scripts/inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits.
 
