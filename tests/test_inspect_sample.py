@@ -52,6 +52,25 @@ HTML_SAMPLE = """<!DOCTYPE html>
 """
 
 
+try:
+    import parsel  # noqa: F401
+
+    HAVE_PARSEL = True
+except ImportError:
+    HAVE_PARSEL = False
+
+HTML_PAGE = """<html><body>
+<ul class="prices">
+  <li class="price">$1</li>
+  <li class="price">$2</li>
+  <li class="price">$3</li>
+</ul>
+<a href="/p/1">one</a><a href="/p/2">two</a>
+<div class="card"><h2>Card A</h2></div>
+<div class="card"><h2>Card B</h2></div>
+</body></html>"""
+
+
 def run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
@@ -71,6 +90,8 @@ class InspectSampleTests(unittest.TestCase):
         self.json_file.write_text(json.dumps(JSON_SAMPLE), encoding="utf-8")
         self.html_file = self.dir / "page.html"
         self.html_file.write_text(HTML_SAMPLE, encoding="utf-8")
+        self.html_page = self.dir / "shop.html"
+        self.html_page.write_text(HTML_PAGE, encoding="utf-8")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -351,6 +372,66 @@ class InspectSampleTests(unittest.TestCase):
         res = run("read", str(self.json_file), "-p", "$.data.items[1].extra")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(json.loads(res.stdout), {"a": 1})  # one path = plain slice, no envelope
+
+    # --- select (CSS over HTML; optional parsel dependency) -------------------
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_count_and_default_matches(self):
+        res = run("select", str(self.html_page), ".price")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["count"], 3)
+        self.assertEqual([m["text"] for m in payload["matches"]], ["$1", "$2", "$3"])
+        self.assertEqual(payload["matches"][0]["tag"], "li")
+        self.assertIn("class", payload["matches"][0]["attrs"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_attr_values(self):
+        res = run("select", str(self.html_page), "a", "--attr", "href")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["values"], ["/p/1", "/p/2"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_html_and_text_modes(self):
+        html_mode = json.loads(run("select", str(self.html_page), ".card", "--html").stdout)
+        self.assertIn("<h2>Card A</h2>", html_mode["values"][0])
+        text_mode = json.loads(run("select", str(self.html_page), ".card", "--text").stdout)
+        self.assertEqual(text_mode["values"], ["Card A", "Card B"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_value_truncation(self):
+        long_val = self.dir / "long.html"
+        long_val.write_text('<p class="t">' + "x" * 2000 + "</p>", encoding="utf-8")
+        res = run("select", str(long_val), ".t", "--text")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertTrue(payload["values"][0].endswith("...[truncated]"))
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_json_path_html_string(self):
+        dump = self.dir / "wrapped.json"
+        dump.write_text(json.dumps({"html": "<b>bold</b><i>it</i>"}), encoding="utf-8")
+        res = run("select", str(dump), "b", "--json-path", "$.html")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["matches"][0]["tag"], "b")
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_select_on_json_file_needs_json_path(self):
+        res = run("select", str(self.json_file), ".price")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("parsed as JSON", res.stdout)
+        self.assertNotIn("Traceback", res.stdout)
+
+    @unittest.skipIf(HAVE_PARSEL, "parsel installed — guidance path not exercised")
+    def test_select_missing_dependency_guidance(self):
+        res = run("select", str(self.html_page), ".price")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("pip install parsel", res.stdout)
+        self.assertNotIn("Traceback", res.stdout)
 
 
 if __name__ == "__main__":

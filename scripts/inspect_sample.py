@@ -587,6 +587,101 @@ def batch_describe_data(sample_path: str | Path, paths: list[str]) -> dict:
     return {"file": str(sample_path), "count": len(results), "results": results}
 
 
+# --- select (CSS over HTML; optional parsel dependency) --------------------------
+
+
+SELECT_MATCH_SHOW = 30
+
+
+def _select_install_hint() -> str:
+    return (
+        "select needs the optional dependency parsel for this interpreter — "
+        f"run: {sys.executable} -m pip install parsel"
+    )
+
+
+def select_data(
+    sample_path: str | Path,
+    selector: str,
+    *,
+    json_path: str = "",
+    attr: str | None = None,
+    want_text: bool = False,
+    want_html: bool = False,
+    limit: int,
+) -> dict[str, Any] | None:
+    """CSS-select over HTML with count-first bounded output.
+
+    Returns None when the optional parsel dependency is missing (caller prints
+    the install hint); otherwise an envelope honouring the batch caps: total
+    match count, first SELECT_MATCH_SHOW matches/values, per-value ``limit``.
+    """
+    try:
+        from parsel import Selector
+    except ImportError:
+        return None
+    sample = _load_sample(sample_path)
+    if json_path:
+        found, node = _select_json_path(sample, json_path)
+        if not found:
+            return {"error": _bounded_text(node, 400)}
+        if not isinstance(node, str):
+            return {
+                "error": (
+                    f"{json_path} resolved to {_json_type_name(node)}, not a string — "
+                    "select needs an HTML string (point --json-path at an HTML field)"
+                )
+            }
+        html = node
+    elif isinstance(sample, str):
+        html = sample
+    else:
+        return {
+            "error": (
+                f"{sample_path} parsed as JSON — select needs HTML; pass -p/--json-path "
+                "pointing at an HTML string field, or use describe/read"
+            )
+        }
+    matches = Selector(text=html).css(selector)
+    total = len(matches)
+    shown = matches[:SELECT_MATCH_SHOW]
+
+    def text_of(m) -> str:
+        return " ".join(" ".join(m.css("::text").getall()).split())
+
+    def bounded(s: str) -> str:
+        return _bounded_text(s, limit)
+
+    if attr is not None:
+        values = [bounded(m.attrib.get(attr, "")) for m in shown]
+    elif want_html:
+        values = [bounded(m.get() or "") for m in shown]
+    elif want_text:
+        values = [bounded(text_of(m)) for m in shown]
+    else:
+        values = None
+    payload: dict[str, Any] = {
+        "file": str(sample_path),
+        "selector": selector,
+        "count": total,
+        "shown": len(shown),
+        "omitted": total - len(shown),
+    }
+    if values is not None:
+        payload["values"] = values
+    else:
+        payload["matches"] = [
+            {
+                "index": index,
+                "tag": m.root.tag,
+                "attrs": dict(m.root.attrib),
+                "text": bounded(text_of(m)),
+            }
+            for index, m in enumerate(shown)
+        ]
+    return payload
+
+
 # --- CLI -------------------------------------------------------------------------
 
 
@@ -642,6 +737,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="text file with one json_path per line (# comments and blank lines allowed)")
     p_read.add_argument("--limit", default=None,
                         help=f"max characters per result (single mode default {DEFAULT_READ_LIMIT}; list mode default {BATCH_VALUE_LIMIT}; 1..{MAX_READ_SAMPLE_CHARS})")
+    p_select = sub.add_parser("select", help="CSS-select over HTML (count-first bounded output; optional parsel dependency)")
+    p_select.add_argument("file", help="HTML file, or a JSON capture paired with --json-path")
+    p_select.add_argument("selector", help="CSS selector")
+    p_select.add_argument("--json-path", default="",
+                          help="optional: address an HTML string field inside a JSON capture")
+    sel_group = p_select.add_mutually_exclusive_group()
+    sel_group.add_argument("--attr", default=None, help="extract this attribute from every match")
+    sel_group.add_argument("--text", action="store_true", help="extract each match's text content")
+    sel_group.add_argument("--html", action="store_true", help="extract each match's outer HTML")
+    p_select.add_argument("--limit", default=None,
+                          help=f"max characters per value (default {BATCH_VALUE_LIMIT})")
     args = parser.parse_args(argv)
 
     path = Path(args.file)
@@ -697,6 +803,37 @@ def main(argv: list[str] | None = None) -> int:
                         if kept > 30:
                             r["omitted"] = True
                             r["value"] = None
+                blob = json.dumps(payload, ensure_ascii=False)
+            print(blob)
+            return 0
+        if args.command == "select":
+            limit = BATCH_VALUE_LIMIT
+            if args.limit is not None:
+                try:
+                    limit = int(str(args.limit).strip())
+                except ValueError:
+                    print("[read_sample] limit must be a positive integer")
+                    return 1
+            payload = select_data(
+                path,
+                args.selector,
+                json_path=args.json_path,
+                attr=args.attr,
+                want_text=args.text,
+                want_html=args.html,
+                limit=limit,
+            )
+            if payload is None:
+                print(f"[inspect_sample] {_select_install_hint()}")
+                return 1
+            if "error" in payload:
+                print(json.dumps(payload, ensure_ascii=False))
+                return 1
+            blob = json.dumps(payload, ensure_ascii=False)
+            if len(blob) > BATCH_TOTAL_CHARS and payload.get("matches"):
+                for entry in payload["matches"][10:]:
+                    entry["text"] = None
+                    entry["omitted"] = True
                 blob = json.dumps(payload, ensure_ascii=False)
             print(blob)
             return 0

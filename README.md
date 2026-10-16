@@ -38,6 +38,10 @@ python scripts/inspect_sample.py read capture.json --paths-file paths.txt
 
 # HTML: JSON-bearing <script> blocks appear as $#script[0], $#script[1], ...
 python scripts/inspect_sample.py read page.html -p '$#script[0].props'
+
+# CSS selectors over HTML (server-rendered pages; needs optional `parsel` —
+# the command prints its exact install command when missing)
+python scripts/inspect_sample.py select page.html 'table.product tr' --attr href
 ```
 
 Single quotes protect `$`, `[`, and `"` in pwsh/bash. List mode caps per-value
@@ -57,10 +61,17 @@ then one ` -> ` per `json.loads` — `$.rc.ee[1].kb -> logistics.carrier`
 python tests/test_inspect_sample.py
 ```
 
-34 cases, any interpreter (Python 3.9+): every case spawns the script as a
+41 cases, any interpreter (Python 3.9+; `select` cases auto-skip when the
+optional `parsel` package is absent): every case spawns the script as a
 subprocess and asserts the agent-facing contract — bounded outputs,
-guidance-not-traceback errors, exit codes, embedded-JSON extraction, and
-per-path batch semantics.
+guidance-not-traceback errors, exit codes, embedded-JSON extraction,
+per-path batch semantics, and CSS selection over HTML.
+
+## Status
+
+v1.8.0. Evolved v1.5.0 → v1.8.0 through a multi-model benchmark
+(strong/weak tiers, natural vs explicit skill triggering); every iteration
+was driven by an observed failure mode with a regression guard.
 
 ## License
 
