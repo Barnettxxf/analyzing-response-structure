@@ -98,6 +98,7 @@ The count starts **after resolving the selected raw path**: file parsing and the
 - One pagination mechanism reported when a cursor and numeric paging coexist.
 - Multi-file batches: comparing only the first file before generalizing — a batch can mix page kinds (listing vs detail, SSR vs API); check one representative file per distinct page type.
 - The urge to read the whole file — that's `describe`'s job.
+- Concluding null/missing without positive search coverage — before concluding a field is absent: search synonyms and variants of the evidence wording (the displayed phrase often differs from the literal field name), inspect the surroundings of the related value (its table headers, labels, adjacent notes), not just the field name itself, and state which regions were searched and which were not. "My search found nothing" is not evidence that the page lacks the value.
 
 ## Additional Commands and Contracts (v1.13–v1.14)
 
