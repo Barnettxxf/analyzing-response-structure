@@ -44,8 +44,8 @@ python scripts/inspect_sample.py read page.html -x '//a' --attr href --show 50
 python scripts/inspect_sample.py read --files 'captures/*.html' -x '//h1/text()'
 
 # Wrap-up: bounded keyword-context search over raw captures (per file or batch).
-python scripts/inspect_sample.py read page.html --grep '增值税' --context 100
-python scripts/inspect_sample.py read --files 'captures/*.html' --grep 'PCN' --show 5
+python scripts/inspect_sample.py read page.html --grep 'kw' --context 100
+python scripts/inspect_sample.py read --files 'captures/*.html' --grep 'kw' --show 5
 ```
 
 Quote paths literally in your shell. `--limit` caps characters **per value**

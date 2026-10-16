@@ -1,23 +1,22 @@
 ---
 name: analyzing-response-structure
 description: >-
-  Use BEFORE analyzing any captured HTTP response file (JSON, HTML, or minified
-  API dump) to learn its data structure and returned fields — when building a
-  parser, extractor, or data model, or when the user asks 返回了什么字段 /
-  数据结构 / 怎么解析. Bundled offline stdlib script (inspect_sample.py):
-  describe prints a bounded path→type→sample map, read slices one subtree —
-  each takes one path or a whole path list in one call — a 2 MB capture
-  never enters context. Demand-signals: about to guess field
-  names or types from experience; only items[0] seen; file too large or
-  single-line minified to read whole; HTML may hide embedded JSON
-  (__NEXT_DATA__, JSON-LD, window.* assignments); type flips plausible
-  (str|null, string|list, "1,299.00"). Delivers a verified field inventory
-  without flooding context. Skip for small config files.
-compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib core; XPath uses optional parsel.
+  Use BEFORE analyzing any captured HTTP response (JSON, HTML, or minified API
+  dump) to learn its data structure and returned fields — when building a
+  parser, extractor, or data model, when the user asks 返回了什么字段 /
+  数据结构 / 怎么解析, or when the user mentions 对接数据源 / 对接 API /
+  接口联调 / 看一下数据源返回什么 — inspect the real captured response
+  before writing integration code. Offline stdlib script
+  (inspect_sample.py): describe prints a bounded path→type→sample map, read
+  slices or batches paths.
+  Demand-signals: about to guess fields from experience; only items[0] seen;
+  file too large or minified to read whole; HTML may hide embedded JSON
+  (__NEXT_DATA__, JSON-LD, window.* assignments); type flips plausible.
+  Delivers a verified field inventory. Skip for small config files.
+compatibility: Python 3.9+. Offline, read-only; XPath needs optional parsel.
 metadata:
   version: "1.14.0"
-  origin: ported from an internal crawler project's parse_dev describe_data/read_sample
-  interpreter: python, python3, py -3, or user-specified
+  interpreter: python, python3, or py -3
 ---
 
 # Analyzing Response Structure
@@ -33,6 +32,7 @@ Never guess what a response contains — observe it. `inspect_sample.py` reads c
 - About to write field access from experience ("probably `data.list[].title`") instead of observing.
 - Only items[0] seen — variance (optional fields, type flips, nulls) hides in later items.
 - The capture is HTML — the real data usually lives in embedded JSON `<script>` blocks.
+- A data-source/API integration task (对接数据源、对接 API、接口联调) — map the real captured response before writing any client code or field mapping.
 
 Skip: small config files — a direct read is cheaper.
 
@@ -110,11 +110,11 @@ python <skill_dir>/scripts/inspect_sample.py read '<html>' -p '$#script[id="app-
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' -p '$#script[id="app-state"].props.count'
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//h1' -x 'count(//tr)' --text
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//a' --html --show 50
-python <skill_dir>/scripts/inspect_sample.py read '<html>' --grep '增值税' --context 100
-python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --grep 'PCN' --show 5
+python <skill_dir>/scripts/inspect_sample.py read '<html>' --grep 'kw' --context 100
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --grep 'kw' --show 5
 ```
 
-- **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants, surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
+- **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants (e.g. a displayed phrase like 含 13% 增值税 vs the field-style shorthand 含税), surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
 
 - **Stable script paths:** use an observed `script_id` from `describe --scripts`; its `id_path` can be passed directly to `read -p`. `$#script[id="..."]` matches any exact, case-sensitive HTML id, with the first inline candidate in document order winning even when malformed. No site/framework aliases. Unnamed scripts remain index-addressable. Ordinary JavaScript can have `parse_error` because it is not strict JSON; it is not proof of absent data. Never execute captured scripts.
 - **Keys and structure:** `describe --keys` lists immediate object key names without descending; `key_count`, `shown` and `omitted_count` disclose coverage. HTML `describe` adds bounded tag and tag.class histograms (at most 30 groups each with omission counts). Array `type_counts`/`scanned_count` cover the shallow key/type scan; `sampled_indices` names emitted first/middle/last roots, not all nested values. Path input is capped at 2048 characters; longer enumerated names may not be addressable via `-p`.
