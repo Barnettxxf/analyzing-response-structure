@@ -15,7 +15,7 @@ description: >-
   without flooding context. Skip for small config files.
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
-  version: "1.10.0"
+  version: "1.11.0"
   origin: ported from an internal crawler project's parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
@@ -45,8 +45,8 @@ Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-spe
 1. **Map**: `describe` the file; scan `entries`; note `truncated` / `truncation_reason`.
 2. **Descend**: truncated, or need one region? `describe --json-path '<subtree>'`.
 3. **Slice**: `read --json-path` the first, a middle, and the LAST element (default 2000 chars covers most object slices); diff key sets and types — item[0]-only inventories are guesses. Many fields at once? `read -p '$.a' -p '$.b'` returns path+type+value for a whole list; many subtrees to map? `describe -p ...` does it in one call.
-4. **Prove variance** (REQUIRED whenever array length is ≥100 or unknown — describe reports cardinality; none noted means unknown): histogram the UNION of item keys across ALL items with a tiny stdlib script — a field present in even one item must be listed with its count. Cite the printed counts as evidence; "confirmed" without counts is a guess. Never write "verified across all items" without that scan.
-5. **Hunt embedded JSON**: HTML `<script>` JSON appears in the map as `#script[0]`, `#script[1]`, … (annotated with id/type). JS-variable assignments (`window.__X__ = {...}`) are NOT addressed — bounded-read that region raw.
+4. **Prove variance** (arrays ≥100): describe now reports `union_keys` (occurrence counts + JSON-type distributions incl. null — heterogeneous arrays like BFF floor lists show every variant), `element_types`, `sampled_indices` and `unsampled_count` — cite these as baseline evidence. For cross-field math (sums, min/max, price×100 comparisons) still run a tiny stdlib script; never write "verified across all items" without either the built-in union or your own scan.
+5. **Hunt embedded JSON**: every inline `<script>` is a candidate in the map as `#script[0]`, `#script[1]`, … annotated with id/type/parse status — a `parse_error` candidate (JS assignment, malformed JSON) is a finding, not absence; its raw head is readable at that path. JS-variable assignments still need manual decode of the raw head.
 6. **Inventory**: report per the contract; every stated path/type comes from an observed slice or the histogram — mark anything else UNVERIFIED, never guess.
 
 ## Quick Reference
@@ -80,7 +80,7 @@ Batch mode: `read --files '<glob>' -p '$.code'` (or one `-x`) applies a single p
 
 The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML string inside a JSON capture via one `-p` container (`read '<file>' -x '//b' -p '$.html'`). XPath is the only DOM selector offered (parsel/lxml: axes, `contains()`, `text()` nodes — a superset of CSS; **unions (`//a | //b`) are not supported — one expression per call**). Count-first: the envelope reports `count` plus `shown`/`omitted`, and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `-p`/`#script[n]` JSON modes never need it. Noise control: text-node queries should exclude scripts with `not(ancestor::script)` (e.g. `//td/text()[not(ancestor::script)]`), and on heavy SSR pages (giant `__NEXT_DATA__`-style state) enumerate script blocks first with `describe --scripts` instead of walking the whole map.
 
-`<skill_dir>` = this skill's base directory; absolute fallback `~/.agents/skills/analyzing-response-structure/scripts/inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits.
+`<skill_dir>` = this skill's base directory; absolute fallback `~/.agents/skills/analyzing-response-structure/scripts/inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits; long string samples show `…[snip]…` between head and tail.
 
 ## Output Contract
 

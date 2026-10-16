@@ -64,7 +64,7 @@ then one ` -> ` per `json.loads` — `$.rc.ee[1].kb -> logistics.carrier`
 python tests/test_inspect_sample.py
 ```
 
-53 cases, any interpreter (Python 3.9+; `-x` cases auto-skip when the
+64 cases, any interpreter (Python 3.9+; `-x` cases auto-skip when the
 optional `parsel` package is absent): every case spawns the script as a
 subprocess and asserts the agent-facing contract — bounded outputs,
 guidance-not-traceback errors, exit codes, embedded-JSON extraction,
@@ -72,7 +72,7 @@ per-path batch semantics, and XPath over HTML.
 
 ## Status
 
-v1.10.0. Evolved v1.5.0 → v1.10.0 through a multi-model benchmark
+v1.11.0. Evolved v1.5.0 → v1.11.0 through a multi-model benchmark
 (strong/weak tiers, natural vs explicit skill triggering); every iteration
 was driven by an observed failure mode with a regression guard.
 

@@ -319,6 +319,11 @@ def _digest_entry(path: str, value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         if _looks_like_html(value):
             return {"path": path, "type": "html", "size": len(value)}
+        if len(value) > MAX_LEAF_SAMPLE * 2:
+            head = value[:MAX_LEAF_SAMPLE]
+            tail = value[-MAX_LEAF_SAMPLE // 2:]
+            return {"path": path, "type": "str", "sample": head + " …[snip]… " + tail,
+                    "length": len(value)}
         return {"path": path, "type": "str", "sample": value[:MAX_LEAF_SAMPLE]}
     if value is None:
         return {"path": path, "type": "null", "sample": "null"}
@@ -360,7 +365,9 @@ def _array_enrichment(value: list) -> dict[str, Any]:
             enrichment["union_keys_truncated"] = True
             enrichment["union_keys_omitted"] = len(ordered) - MAX_UNION_KEYS
     mid = n // 2
-    enrichment["sampled_indices"] = sorted({0, mid, n - 1})
+    sampled = sorted({0, mid, n - 1})
+    enrichment["sampled_indices"] = sampled
+    enrichment["unsampled_count"] = n - len(sampled)
     return enrichment
 
 

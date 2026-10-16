@@ -491,6 +491,18 @@ class InspectSampleTests(unittest.TestCase):
         payload = json.loads(run("describe", str(f)).stdout)
         entry = next(e for e in payload["entries"] if e["path"] == "$.rows")
         self.assertEqual(entry["sampled_indices"], [0, 100, 199])
+        self.assertEqual(entry["unsampled_count"], 197)
+
+    def test_describe_long_string_sample_head_and_tail(self):
+        raw = json.dumps({"blob": "HEAD" + "x" * 300 + "TAIL"})
+        f = self.dir / "blob.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        entry = next(e for e in payload["entries"] if e["path"] == "$.blob")
+        self.assertEqual(entry["length"], 308)
+        self.assertTrue(entry["sample"].startswith("HEAD"))
+        self.assertTrue(entry["sample"].endswith("TAIL"))
+        self.assertIn("…[snip]…", entry["sample"])
 
     def test_describe_list_union_keys_capped(self):
         big = {"k%02d" % i: i for i in range(60)}
