@@ -139,7 +139,9 @@ class InspectSampleTests(unittest.TestCase):
     def test_describe_large_array_stays_bounded(self):
         big = self.dir / "big.json"
         big.write_text(
-            json.dumps({"data": {"items": [{"id": i, "v": i % 7} for i in range(3000)]}}),
+            json.dumps(
+                {"data": {"items": [{"id": i, "v": i % 7} for i in range(3000)]}}
+            ),
             encoding="utf-8",
         )
         res = run("describe", str(big))
@@ -165,7 +167,14 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(json.loads(res.stdout), {"a": 1})
 
     def test_read_truncation_marker_and_clamp(self):
-        res = run("read", str(self.json_file), "--json-path", "$.data.items[0]", "--limit", "20")
+        res = run(
+            "read",
+            str(self.json_file),
+            "--json-path",
+            "$.data.items[0]",
+            "--limit",
+            "20",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(res.stdout.strip().endswith("...[truncated]"))
         huge = run("read", str(self.json_file), "--limit", "999999")
@@ -261,9 +270,16 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(json.loads(res.stdout), {"b": 2})
 
     def test_batch_multi_path_with_types(self):
-        res = run("batch", str(self.json_file), "--json-path", "$.code",
-                  "--json-path", "$.data.items[1].price",
-                  "--json-path", "$.data.items[1].extra.a")
+        res = run(
+            "batch",
+            str(self.json_file),
+            "--json-path",
+            "$.code",
+            "--json-path",
+            "$.data.items[1].price",
+            "--json-path",
+            "$.data.items[1].extra.a",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 3)
@@ -273,8 +289,14 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(by["$.data.items[1].extra.a"]["value"], "1")
 
     def test_batch_not_found_is_per_path(self):
-        res = run("batch", str(self.json_file), "--json-path", "$.code",
-                  "--json-path", "$.data.nope")
+        res = run(
+            "batch",
+            str(self.json_file),
+            "--json-path",
+            "$.code",
+            "--json-path",
+            "$.data.nope",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertTrue(payload["results"][0]["ok"])
@@ -309,20 +331,31 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(payload["results"][0]["type"], "integer")
 
     def test_batch_describe_multi_and_miss(self):
-        res = run("batch_describe", str(self.json_file),
-                  "--json-path", "$.data.items[0]", "--json-path", "$.data.nope")
+        res = run(
+            "batch_describe",
+            str(self.json_file),
+            "--json-path",
+            "$.data.items[0]",
+            "--json-path",
+            "$.data.nope",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 2)
         by = {r["path"]: r for r in payload["results"]}
         self.assertTrue(by["$.data.items[0]"]["ok"])
-        self.assertIn("$.data.items[0].id", {e["path"] for e in by["$.data.items[0]"]["describe"]["entries"]})
+        self.assertIn(
+            "$.data.items[0].id",
+            {e["path"] for e in by["$.data.items[0]"]["describe"]["entries"]},
+        )
         self.assertFalse(by["$.data.nope"]["ok"])
         self.assertIn("available keys", by["$.data.nope"]["error"])
 
     def test_batch_describe_paths_file(self):
         pf = self.dir / "subtrees.txt"
-        pf.write_text("# subtrees\n\n$.data.items[0]\n   \n$.data.pagination\n", encoding="utf-8")
+        pf.write_text(
+            "# subtrees\n\n$.data.items[0]\n   \n$.data.pagination\n", encoding="utf-8"
+        )
         res = run("batch_describe", str(self.json_file), "--paths-file", str(pf))
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
@@ -332,10 +365,14 @@ class InspectSampleTests(unittest.TestCase):
     def test_batch_describe_output_budget(self):
         fat = self.dir / "fat.json"
         fat.write_text(
-            json.dumps({f"b{i}": {f"k{j}": "v" * 100 for j in range(60)} for i in range(12)}),
+            json.dumps(
+                {f"b{i}": {f"k{j}": "v" * 100 for j in range(60)} for i in range(12)}
+            ),
             encoding="utf-8",
         )
-        res = run("batch_describe", str(fat), "--json-path", * [f"$.b{i}" for i in range(12)])
+        res = run(
+            "batch_describe", str(fat), "--json-path", *[f"$.b{i}" for i in range(12)]
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertLessEqual(len(res.stdout), 83_000)
         payload = json.loads(res.stdout)
@@ -349,7 +386,9 @@ class InspectSampleTests(unittest.TestCase):
     # --- unified batch surface (v1.7.0: every command takes one path or a list) ---
 
     def test_read_multi_path_envelope(self):
-        res = run("read", str(self.json_file), "-p", "$.code", "-p", "$.data.items[1].price")
+        res = run(
+            "read", str(self.json_file), "-p", "$.code", "-p", "$.data.items[1].price"
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 2)
@@ -365,18 +404,30 @@ class InspectSampleTests(unittest.TestCase):
         self.assertTrue(all(r["ok"] for r in payload["results"]))
 
     def test_describe_multi_path_envelope(self):
-        res = run("describe", str(self.json_file), "-p", "$.data.items[0]", "-p", "$.data.nope")
+        res = run(
+            "describe",
+            str(self.json_file),
+            "-p",
+            "$.data.items[0]",
+            "-p",
+            "$.data.nope",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         by = {r["path"]: r for r in payload["results"]}
         self.assertTrue(by["$.data.items[0]"]["ok"])
-        self.assertIn("$.data.items[0].id", {e["path"] for e in by["$.data.items[0]"]["describe"]["entries"]})
+        self.assertIn(
+            "$.data.items[0].id",
+            {e["path"] for e in by["$.data.items[0]"]["describe"]["entries"]},
+        )
         self.assertFalse(by["$.data.nope"]["ok"])
 
     def test_read_single_path_stays_compact(self):
         res = run("read", str(self.json_file), "-p", "$.data.items[1].extra")
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(json.loads(res.stdout), {"a": 1})  # one path = plain slice, no envelope
+        self.assertEqual(
+            json.loads(res.stdout), {"a": 1}
+        )  # one path = plain slice, no envelope
 
     def test_read_html_miss_hints_script_selector(self):
         res = run("read", str(self.html_page), "-p", "$.nothing")
@@ -422,14 +473,22 @@ class InspectSampleTests(unittest.TestCase):
     def test_read_files_glob_xpath(self):
         batch = self.dir / "batchx"
         batch.mkdir()
-        (batch / "p1.html").write_text("<html><body><h1>Alpha</h1></body></html>", encoding="utf-8")
-        (batch / "p2.html").write_text("<html><body><h1>Beta</h1></body></html>", encoding="utf-8")
-        res = run("read", "--files", str(batch / "*.html"), "-x", "//h1/text()", "--text")
+        (batch / "p1.html").write_text(
+            "<html><body><h1>Alpha</h1></body></html>", encoding="utf-8"
+        )
+        (batch / "p2.html").write_text(
+            "<html><body><h1>Beta</h1></body></html>", encoding="utf-8"
+        )
+        res = run(
+            "read", "--files", str(batch / "*.html"), "-x", "//h1/text()", "--text"
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["file_count"], 2)
         self.assertTrue(all(r["ok"] for r in payload["results"]))
-        self.assertEqual([r["values"][0] for r in payload["results"]], ["Alpha", "Beta"])
+        self.assertEqual(
+            [r["values"][0] for r in payload["results"]], ["Alpha", "Beta"]
+        )
 
     def test_read_files_requires_exactly_one_path(self):
         res = run("read", "--files", str(self.dir / "*.json"), "-p", "$.a", "-p", "$.b")
@@ -445,7 +504,9 @@ class InspectSampleTests(unittest.TestCase):
     def test_read_files_per_file_error_is_row_level(self):
         batch = self.dir / "mixed"
         batch.mkdir()
-        (batch / "good.html").write_text("<html><body><h1>Hi</h1></body></html>", encoding="utf-8")
+        (batch / "good.html").write_text(
+            "<html><body><h1>Hi</h1></body></html>", encoding="utf-8"
+        )
         (batch / "data.json").write_text(json.dumps({"not": "html"}), encoding="utf-8")
         res = run("read", "--files", str(batch / "*"), "-x", "//h1/text()")
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -457,11 +518,15 @@ class InspectSampleTests(unittest.TestCase):
     # --- P0-1: array union-key / type-distribution enrichment -------------------
 
     def test_describe_list_union_keys_and_type_distribution(self):
-        raw = json.dumps({"floors": [
-            {"type": "banner", "img": "x.png"},
-            {"type": "goods", "items": [{"sku": "s1"}]},
-            {"type": "coupon", "amount": 5, "memo": None},
-        ]})
+        raw = json.dumps(
+            {
+                "floors": [
+                    {"type": "banner", "img": "x.png"},
+                    {"type": "goods", "items": [{"sku": "s1"}]},
+                    {"type": "coupon", "amount": 5, "memo": None},
+                ]
+            }
+        )
         f = self.dir / "floors.json"
         f.write_text(raw, encoding="utf-8")
         res = run("describe", str(f))
@@ -521,7 +586,10 @@ class InspectSampleTests(unittest.TestCase):
         f.write_text(raw, encoding="utf-8")
         payload = json.loads(run("describe", str(f)).stdout)
         entry = next(e for e in payload["entries"] if e["path"] == "$.mixed")
-        self.assertEqual(entry["element_types"], {"str": 1, "int": 1, "NoneType": 1, "bool": 1, "float": 1})
+        self.assertEqual(
+            entry["element_types"],
+            {"str": 1, "int": 1, "NoneType": 1, "bool": 1, "float": 1},
+        )
 
     # --- P0-3: negative index support --------------------------------------------
 
@@ -540,7 +608,9 @@ class InspectSampleTests(unittest.TestCase):
         res = run("describe", str(self.json_file), "-p", "$.data.items[-1]")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
-        self.assertTrue(any(e["path"].endswith("items[-1].id") for e in payload["entries"]))
+        self.assertTrue(
+            any(e["path"].endswith("items[-1].id") for e in payload["entries"])
+        )
 
     # --- P0-2: malformed embedded JSON is reported, not silently dropped --------
 
@@ -549,10 +619,14 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         by_index = {s["index"]: s for s in payload["scripts"]}
-        self.assertEqual(payload["count"], 4)  # NEXT_DATA, ld+json, window.__CFG__, malformed
+        self.assertEqual(
+            payload["count"], 4
+        )  # NEXT_DATA, ld+json, window.__CFG__, malformed
         self.assertFalse(by_index[0].get("parse_error"))
         self.assertFalse(by_index[1].get("parse_error"))
-        self.assertTrue(by_index[2].get("parse_error"))  # window.__CFG__ = ... 不是 JSON 文本
+        self.assertTrue(
+            by_index[2].get("parse_error")
+        )  # window.__CFG__ = ... 不是 JSON 文本
         self.assertTrue(by_index[3].get("parse_error"))  # "not json at all"
         self.assertIn("not json at all", by_index[3]["head"])
 
@@ -565,12 +639,19 @@ class InspectSampleTests(unittest.TestCase):
     # --- P1-8: observational pagination candidates -------------------------------
 
     def test_describe_pagination_candidates(self):
-        raw = json.dumps({
-            "pagination": {"page": 3, "page_size": 200, "total": 977, "has_more": True},
-            "next_token": "tk_999",
-            "message": "hi",
-            "items": [{"a": 1}],
-        })
+        raw = json.dumps(
+            {
+                "pagination": {
+                    "page": 3,
+                    "page_size": 200,
+                    "total": 977,
+                    "has_more": True,
+                },
+                "next_token": "tk_999",
+                "message": "hi",
+                "items": [{"a": 1}],
+            }
+        )
         f = self.dir / "pag.json"
         f.write_text(raw, encoding="utf-8")
         payload = json.loads(run("describe", str(f)).stdout)
@@ -582,7 +663,9 @@ class InspectSampleTests(unittest.TestCase):
         self.assertIn("$.pagination.has_more", cand_paths)
         self.assertIn("$.next_token", cand_paths)
         self.assertNotIn("$.message", cand_paths)  # 非分页键不误报
-        self.assertIn("observational candidates only", payload.get("pagination_note", ""))
+        self.assertIn(
+            "observational candidates only", payload.get("pagination_note", "")
+        )
 
     def test_describe_pagination_candidates_capped(self):
         big = {f"page_{i}": i for i in range(30)}
@@ -597,8 +680,12 @@ class InspectSampleTests(unittest.TestCase):
         batch = self.dir / "batchx2"
         batch.mkdir()
         (batch / "p1.html").write_text(
-            '<html><body><a href="/a1">one</a><a href="/a2">two</a></body></html>', encoding="utf-8")
-        res_attr = run("read", "--files", str(batch / "p1.html"), "-x", "//a", "--attr", "href")
+            '<html><body><a href="/a1">one</a><a href="/a2">two</a></body></html>',
+            encoding="utf-8",
+        )
+        res_attr = run(
+            "read", "--files", str(batch / "p1.html"), "-x", "//a", "--attr", "href"
+        )
         res_html = run("read", "--files", str(batch / "p1.html"), "-x", "//a", "--html")
         attr_payload = json.loads(res_attr.stdout)
         html_payload = json.loads(res_html.stdout)
@@ -609,10 +696,20 @@ class InspectSampleTests(unittest.TestCase):
         batch = self.dir / "batchlim"
         batch.mkdir()
         (batch / "c.json").write_text(json.dumps({"code": 7}), encoding="utf-8")
-        bad = run("read", "--files", str(batch / "c.json"), "-p", "$.code", "--limit", "0")
+        bad = run(
+            "read", "--files", str(batch / "c.json"), "-p", "$.code", "--limit", "0"
+        )
         self.assertEqual(bad.returncode, 1)
         self.assertIn("positive integer", bad.stdout)
-        big = run("read", "--files", str(batch / "c.json"), "-p", "$.code", "--limit", "999999")
+        big = run(
+            "read",
+            "--files",
+            str(batch / "c.json"),
+            "-p",
+            "$.code",
+            "--limit",
+            "999999",
+        )
         self.assertEqual(big.returncode, 0)  # clamp 到 MAX，不报错
 
     def test_read_files_identity_uses_relative_path(self):
@@ -622,13 +719,22 @@ class InspectSampleTests(unittest.TestCase):
         d2.mkdir()
         (d1 / "x.json").write_text(json.dumps({"code": 1}), encoding="utf-8")
         (d2 / "x.json").write_text(json.dumps({"code": 2}), encoding="utf-8")
-        res = run("read", "--files", str(d1 / "*.json"), "--files", str(d2 / "x.json"),
-                  "-p", "$.code")
+        res = run(
+            "read",
+            "--files",
+            str(d1 / "*.json"),
+            "--files",
+            str(d2 / "x.json"),
+            "-p",
+            "$.code",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["file_count"], 2)
         self.assertEqual([r["value"] for r in payload["results"]], ["1", "2"])
-        self.assertEqual(len({r["path"] for r in payload["results"]}), 2)  # path 唯一可追溯
+        self.assertEqual(
+            len({r["path"] for r in payload["results"]}), 2
+        )  # path 唯一可追溯
 
     # --- v1.13.0: grouped -x + scalar XPath expressions --------------------------
 
@@ -650,7 +756,9 @@ class InspectSampleTests(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_read_multi_x_grouped_envelope(self):
-        res = run("read", str(self.html_page), "-x", "//a", "-x", '//div[@class="card"]')
+        res = run(
+            "read", str(self.html_page), "-x", "//a", "-x", '//div[@class="card"]'
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["count"], 2)
@@ -673,8 +781,13 @@ class InspectSampleTests(unittest.TestCase):
     def test_read_files_batch_scalar_xpath(self):
         batch = self.dir / "batchs"
         batch.mkdir()
-        (batch / "a.html").write_text("<html><body><li>x1</li><li>x2</li><li>x3</li></body></html>", encoding="utf-8")
-        (batch / "b.html").write_text("<html><body><li>y1</li></body></html>", encoding="utf-8")
+        (batch / "a.html").write_text(
+            "<html><body><li>x1</li><li>x2</li><li>x3</li></body></html>",
+            encoding="utf-8",
+        )
+        (batch / "b.html").write_text(
+            "<html><body><li>y1</li></body></html>", encoding="utf-8"
+        )
         res = run("read", "--files", str(batch / "*.html"), "-x", "count(//li)")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
@@ -687,6 +800,45 @@ class InspectSampleTests(unittest.TestCase):
         res = run("read", "--files", str(self.html_page), "-x", "//a", "-x", "//b")
         self.assertEqual(res.returncode, 1)
         self.assertIn("single expression", res.stdout)
+
+    # --- v1.14.0: script-by-id, @-prefixed keys, --attr fix -----------------------
+
+    def test_read_script_by_id(self):
+        res = run(
+            "read", str(self.html_file), "-p", '$#script[id="__NEXT_DATA__"].props'
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {"x": 1})
+
+    def test_describe_script_by_id(self):
+        res = run(
+            "describe", str(self.html_file), "-p", '$#script[id="__NEXT_DATA__"].props'
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertTrue(any(e["path"].endswith("props.x") for e in payload["entries"]))
+
+    def test_read_script_by_id_not_found(self):
+        res = run("read", str(self.html_file), "-p", '$#script[id="nope"]')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("no script", res.stdout)
+        self.assertIn("available", res.stdout)
+
+    def test_read_at_type_bracket(self):
+        raw = json.dumps({"ld": [{"@type": "Product", "name": "x"}]})
+        f = self.dir / "ld.json"
+        f.write_text(raw, encoding="utf-8")
+        res = run("read", str(f), "-p", '$.ld[0]["@type"]')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "Product")
+
+    def test_read_dot_at_type(self):
+        raw = json.dumps({"ld": {"@type": "Product"}})
+        f = self.dir / "at.json"
+        f.write_text(raw, encoding="utf-8")
+        res = run("read", str(f), "-p", "$.ld.@type")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "Product")
 
     # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 
@@ -708,7 +860,7 @@ class InspectSampleTests(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_read_xpath_invalid_expression_is_guidance(self):
-        res = run("read", str(self.html_page), "-x", '//a[@href=')  # malformed XPath
+        res = run("read", str(self.html_page), "-x", "//a[@href=")  # malformed XPath
         self.assertEqual(res.returncode, 1)
         self.assertIn("XPath error", res.stdout)
         self.assertNotIn("Traceback", res.stdout)
@@ -716,11 +868,15 @@ class InspectSampleTests(unittest.TestCase):
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_read_xpath_text_and_html_modes(self):
         text_mode = json.loads(
-            run("read", str(self.html_page), "-x", '//div[@class="card"]', "--text").stdout
+            run(
+                "read", str(self.html_page), "-x", '//div[@class="card"]', "--text"
+            ).stdout
         )
         self.assertEqual(text_mode["values"], ["Card A", "Card B"])
         html_mode = json.loads(
-            run("read", str(self.html_page), "-x", '//div[@class="card"]/h2', "--html").stdout
+            run(
+                "read", str(self.html_page), "-x", '//div[@class="card"]/h2', "--html"
+            ).stdout
         )
         self.assertIn("<h2>Card A</h2>", html_mode["values"][0])
 
@@ -763,7 +919,9 @@ class InspectSampleTests(unittest.TestCase):
         payload = json.loads(res.stdout)
         paths = {e["path"] for e in payload["entries"]}
         self.assertIn("$.matches[0].tag", paths)
-        self.assertIn("$.matches[0].text", paths)  # describe expands [0] of lists by convention
+        self.assertIn(
+            "$.matches[0].text", paths
+        )  # describe expands [0] of lists by convention
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_describe_xpath_on_json_needs_container(self):

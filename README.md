@@ -1,82 +1,88 @@
 # analyzing-response-structure
 
-An agent skill for bounded structure inspection of captured HTTP responses
-(JSON, HTML, or minified API dumps) — map first, slice second, inventory last,
-so even a 2 MB capture stays out of the model's context window.
+A generic agent skill for bounded inspection of captured HTTP responses
+(JSON or HTML): map first, slice second, inventory last. Captures are parsed
+locally, not dumped into the model's context.
 
-See [SKILL.md](SKILL.md) for the full method and output contract.
+See [SKILL.md](SKILL.md) for the workflow, path grammar and evidence contract.
 
 ## Install
 
-Copy this directory into your runtime's skills directory, e.g.
-`~/.agents/skills/analyzing-response-structure/`. Requires Python 3.9+
-(stdlib only, offline, read-only).
-
-The repo root **is** the skill directory (`SKILL.md` at root), so cloning
-straight into the skills directory works everywhere:
+The repository root is the skill directory. Requires Python 3.9+; core JSON
+inspection and HTML summaries are stdlib-only, offline and read-only.
+XPath requires optional `parsel`; a missing dependency prints an install
+command for the active interpreter.
 
 | Runtime | Install |
 |---|---|
-| Claude Code (marketplace) | `/plugin marketplace add Barnettxxf/analyzing-response-structure` then `/plugin install analyzing-response-structure@analyzing-response-structure` |
+| Claude Code (marketplace) | `/plugin marketplace add Barnettxxf/analyzing-response-structure`, then `/plugin install analyzing-response-structure@analyzing-response-structure` |
 | Claude Code (manual) | `git clone https://github.com/Barnettxxf/analyzing-response-structure ~/.claude/skills/analyzing-response-structure` |
 | Codex CLI | `git clone https://github.com/Barnettxxf/analyzing-response-structure ~/.agents/skills/analyzing-response-structure` |
-| Gemini CLI / Copilot CLI | same as Codex (`~/.agents/skills/` is the cross-runtime alias) |
-| DSH (DeepSeek Harness) | same as Codex — `~/.agents/skills/` is scanned live, no restart needed |
+| Gemini CLI / Copilot CLI / DSH | Same cross-runtime `~/.agents/skills/` location |
 
 ## Usage
 
 ```bash
-# bounded path->type->sample map (whole file)
+# Bounded recursive map; or immediate key names only.
 python scripts/inspect_sample.py describe capture.json
+python scripts/inspect_sample.py describe capture.json -p '$.data' --keys
 
-# one subtree, or a whole path list (values for each path)
-python scripts/inspect_sample.py describe capture.json -p '$.data.items'
-python scripts/inspect_sample.py read capture.json -p '$.code' -p '$.data.items[0].title'
-
-# bulk form of the same path list (# comments and blank lines allowed)
+# One slice, multiple paths, or a UTF-8 paths file.
+python scripts/inspect_sample.py read capture.json -p '$.data.items[-1]'
+python scripts/inspect_sample.py read capture.json -p '$.code' -p '$.data.items[0]'
 python scripts/inspect_sample.py read capture.json --paths-file paths.txt
 
-# HTML: JSON-bearing <script> blocks appear as $#script[0], $#script[1], ...
-python scripts/inspect_sample.py read page.html -p '$#script[0].props'
+# Discover script IDs before using a stable, case-sensitive ID selector.
+python scripts/inspect_sample.py describe page.html --scripts
+python scripts/inspect_sample.py read page.html -p '$#script[id="app-state"].props'
 
-# XPath over HTML (server-rendered pages; needs optional `parsel` —
-# the command prints its exact install command when missing)
-python scripts/inspect_sample.py read page.html -x '//table[@class="product"]//tr' --attr href
+# Group XPath probes (optional parsel). One output mode applies to all groups.
+python scripts/inspect_sample.py read page.html -x '//h1' -x 'count(//tr)' --text
+python scripts/inspect_sample.py read page.html -x '//a' --attr href --show 50
 
-# batch: one path across a whole glob of captures (page-type detection, variance loops)
-python scripts/inspect_sample.py read --files 'captures\detail-*.html' -x '//h1/text()'
+# Multi-file probe: one path or XPath across all matching captures.
+python scripts/inspect_sample.py read --files 'captures/*.html' -x '//h1/text()'
 ```
 
-Single quotes protect `$`, `[`, and `"` in pwsh/bash. List mode caps per-value
-output (600 chars default, `--limit` overrides) and total output at 80K chars
-(past it, results come back `"omitted": true` — split the list, don't raise
-limits).
+Quote paths literally in your shell. `--limit` caps characters **per value**
+(default 2000 for one raw/JSON slice; 600 for path lists/XPath; clamp 16–20000).
+`--show` caps displayed XPath matches (default 30; clamp 1–200), not total counts.
+Descriptions cap at 24000 output characters; grouped reads/file batches at
+80000 serialized JSON characters. Check omission metadata and split requests
+when a budget is reached. Input size and tokens are not these budgets.
+
+HTML `describe` includes bounded tag/class histograms. Arrays expose shallow
+union-key counts, JSON type frequencies including null, and first/middle/last
+value samples with actual emitted sample indices. Neither is a complete
+semantic/value scan.
 
 ## Decode notation
 
-Values inside JSON-encoded strings use the skill's own convention: raw path,
-then one ` -> ` per `json.loads` — `$.rc.ee[1].kb -> logistics.carrier`
-(decode once); `$.rc.ee[7].kb -> note -> inner_code` (decode twice).
+A ` -> ` means one additional `json.loads` **after resolving the raw path**.
+Script selectors already parse script JSON, so
+`$#script[id="app-state"].encoded -> bucket` has one further decode.
+Arrows are report notation, not executable path syntax, and do not denote HTML
+parsing; HTML-in-JSON uses a container path plus XPath.
 
 ## Tests
 
 ```bash
-python tests/test_inspect_sample.py
+python -m unittest discover -s tests
 ```
 
-69 cases, any interpreter (Python 3.9+; `-x` cases auto-skip when the
-optional `parsel` package is absent): every case spawns the script as a
-subprocess and asserts the agent-facing contract — bounded outputs,
-guidance-not-traceback errors, exit codes, embedded-JSON extraction,
-per-path batch semantics, and XPath over HTML.
+120 behavioral regression cases at this revision. XPath cases skip explicitly
+when `parsel` is absent; dependency guidance is exercised on an interpreter
+without it. Tests spawn the real CLI and assert values, exit codes, coverage
+metadata and output budgets. Synthetic fixtures stay small and portable;
+external real-capture field tests are reported separately, not treated as gold
+truth merely because two model outputs agree.
 
-## Status
+## Version
 
-v1.13.0. Evolved v1.5.0 → v1.13.0 through a multi-model benchmark
-(strong/weak tiers, natural vs explicit skill triggering); every iteration
-was driven by an observed failure mode with a regression guard.
+v1.14.0: stable script-ID paths, quoted special keys, safe attribute extraction,
+shared grouped XPath modes, keys-only maps, bounded HTML structure counts and
+configurable match display. No site-specific selectors or framework aliases.
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) —
-choose either at your option.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).

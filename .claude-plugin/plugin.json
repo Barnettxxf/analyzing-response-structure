@@ -1,7 +1,7 @@
 {
   "name": "analyzing-response-structure",
-  "version": "1.7.2",
-  "description": "Bounded structure inspection of captured HTTP responses (JSON/HTML): describe/read/batch CLI with a decode notation contract — keeps even 2 MB captures out of the model's context window. Python 3.9+ stdlib only.",
+  "version": "1.14.0",
+  "description": "Bounded offline inspection of captured JSON/HTML: stable script IDs, key maps, HTML structure counts and grouped XPath. Python 3.9+ stdlib core; XPath uses optional parsel.",
   "author": { "name": "Barnett Xu" },
   "homepage": "https://github.com/Barnettxxf/analyzing-response-structure",
   "repository": "https://github.com/Barnettxxf/analyzing-response-structure",

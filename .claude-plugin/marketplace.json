@@ -5,7 +5,7 @@
     {
       "name": "analyzing-response-structure",
       "source": "./",
-      "description": "Bounded structure inspection of captured HTTP responses (JSON/HTML): describe/read/batch CLI, decode notation, stdlib-only Python 3.9+."
+      "description": "Bounded offline JSON/HTML inspection: stable script IDs, key maps and grouped XPath. Python 3.9+ stdlib core; XPath uses optional parsel."
     }
   ]
 }

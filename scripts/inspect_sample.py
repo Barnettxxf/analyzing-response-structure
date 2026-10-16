@@ -1,44 +1,29 @@
 #!/usr/bin/env python3
-"""inspect_sample.py — bounded structure inspection for captured response files.
+"""Bounded, read-only, offline inspection of captured JSON and HTML.
 
-Standalone port of ``describe_data`` / ``read_sample`` from viber's
-``crawl_runner/parse_dev.py`` (deep-digest + json_path addressing, 2026-10-12),
-stripped of spider/engine dependencies for use as a personal agent skill.
-
-Dependencies: Python 3.9+ standard library ONLY. Nothing to install.
-Read-only, offline, stateless.
-
-Intentional deltas vs the parsel-based original (documented; do NOT "fix"):
-- Embedded JSON <script> discovery uses stdlib ``html.parser`` instead of
-  parsel/lxml:
-    * A <script> inside an HTML comment is NOT extracted (tag events are never
-      fired inside comments) — same net behavior as lxml.
-    * An unclosed <script> swallows the rest of the file as its body (CDATA
-      mode); its JSON parse then fails and it is skipped with a note — same as
-      a browser would treat it.
-    * ``</script>`` inside a JSON string literal terminates the script early —
-      identical to browsers and to the parsel original.
-- CSS selector mode is intentionally NOT ported. DOM fragments are the agent's
-  job via its own bounded read/grep tools; json_path addressing covers every
-  structure-inspection need ($ .key  [0]  ["quoted key"]  #script[n]).
-- Error/truncation markers are English ("...[truncated]") instead of Chinese.
-- Input files are decoded as utf-8-sig with errors="replace" so GBK/BOM-mangled
-  captures still describe (with replacement chars) instead of crashing.
+Python 3.9+ stdlib handles JSON paths, inline-script discovery and HTML structure
+counts. XPath is optional and uses parsel/lxml. No scripts from captures run.
+Script candidates are non-empty closed inline <script> elements; comments and
+external-only scripts are excluded. A literal </script> ends the element even
+inside a JSON string, as in HTML parsing. Inputs use utf-8-sig with replacement
+characters for undecodable bytes, never an implicit claim of the right encoding.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import json
+import math
 import os
 import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+IDENTIFIER_RE = re.compile(r"^[@A-Za-z_$][@A-Za-z0-9_$]*$")
 SCRIPT_MARKER = "#script["
 MAX_DIGEST_KEYS = 50
 MAX_DIGEST_ENTRIES = 200
@@ -100,9 +85,6 @@ class _ScriptCollector(HTMLParser):
         self._chunks: list[str] = []
         self._meta: tuple[str | None, str | None] = (None, None)
 
-    def _wants(self, attrs: list[tuple[str, str | None]]) -> bool:
-        return True  # v1.11: every inline <script> is a candidate (parse status recorded)
-
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "script" and not self._capturing:
             attrd = {str(k).lower(): str(v or "") for k, v in attrs}
@@ -120,6 +102,7 @@ class _ScriptCollector(HTMLParser):
                 "id": self._meta[0],
                 "type": self._meta[1],
                 "length": len(text),
+                "byte_length": len(text.encode("utf-8")),
             }
             try:
                 entry["value"] = json.loads(text)
@@ -133,6 +116,54 @@ class _ScriptCollector(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._capturing:
             self._chunks.append(data)
+
+
+class _HTMLStructure(HTMLParser):
+    """Count element/tag.class presence, never copy body text or attribute values."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.element_count = 0
+        self.tags: dict[str, int] = {}
+        self.classes: dict[str, int] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.element_count += 1
+        self.tags[tag] = self.tags.get(tag, 0) + 1
+        for key, value in attrs:
+            if key == "class" and value:
+                for name in set(value.split()):
+                    label = f"{tag}.{name}"
+                    self.classes[label] = self.classes.get(label, 0) + 1
+                break
+
+
+def _html_structure(html: str) -> dict[str, Any]:
+    counter = _HTMLStructure()
+    counter.feed(html)
+    counter.close()
+    tags = dict(sorted(counter.tags.items(), key=lambda pair: (-pair[1], pair[0]))[:30])
+    classes = dict(
+        sorted(counter.classes.items(), key=lambda pair: (-pair[1], pair[0]))[:30]
+    )
+    result: dict[str, Any] = {
+        "element_count": counter.element_count,
+        "distinct_tags": len(counter.tags),
+        "distinct_tag_classes": len(counter.classes),
+        "tag_counts": tags,
+        "class_counts": classes,
+    }
+    # Long custom tag/class names must not displace the entire path map.
+    while len(json.dumps(result, ensure_ascii=False)) > 3800 and (classes or tags):
+        (classes if classes else tags).popitem()
+    result.update(
+        tag_groups_omitted=len(counter.tags) - len(tags),
+        class_groups_omitted=len(counter.classes) - len(classes),
+    )
+    result["truncated"] = bool(
+        result["tag_groups_omitted"] or result["class_groups_omitted"]
+    )
+    return result
 
 
 def _embedded_json_scripts(html: str) -> list[dict[str, Any]]:
@@ -156,10 +187,41 @@ def _parse_limit(raw: Any, default: int) -> tuple[int, str | None]:
         return 0, "[read_sample] limit must be a positive integer"
     if limit < 1:
         return 0, "[read_sample] limit must be a positive integer"
-    return max(limit, LIMIT_MIN), None
+    return min(max(limit, LIMIT_MIN), MAX_READ_SAMPLE_CHARS), None
 
 
 # --- json_path grammar ----------------------------------------------------------
+
+
+def _path_bracket_end(path: str, start: int) -> int:
+    """Find ] outside either quote style; escaped quotes/brackets stay in a key."""
+    quote = ""
+    escaped = False
+    for index in range(start, len(path)):
+        char = path[index]
+        if escaped:
+            escaped = False
+        elif quote:
+            if char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "]":
+            return index
+    return -1
+
+
+def _path_string(raw: str) -> Any:
+    """Decode a quoted path key, never execute expressions from a path."""
+    if len(raw) < 2 or raw[0] not in ("'", '"') or raw[-1] != raw[0]:
+        return _PARSE_FAILED
+    try:
+        value = json.loads(raw) if raw[0] == '"' else ast.literal_eval(raw)
+    except (SyntaxError, TypeError, ValueError):
+        return _PARSE_FAILED
+    return value if isinstance(value, str) else _PARSE_FAILED
 
 
 def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
@@ -175,11 +237,19 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
     while index < len(json_path):
         if json_path.startswith(SCRIPT_MARKER, index):
             start = index + len(SCRIPT_MARKER)
-            end = json_path.find("]", start)
+            end = _path_bracket_end(json_path, start)
             raw = json_path[start:end] if end >= 0 else ""
-            if end < 0 or not digit_index.fullmatch(raw):
-                return "script selector must be #script[non-negative integer]"
-            tokens.append(("script", int(raw)))
+            if end < 0:
+                return "unclosed script selector"
+            if digit_index.fullmatch(raw):
+                tokens.append(("script", int(raw)))
+            elif raw.startswith("id="):
+                sid = _path_string(raw[3:])
+                if sid is _PARSE_FAILED:
+                    return 'script selector needs a quoted id, e.g. #script[id="state"]'
+                tokens.append(("script_id", sid))
+            else:
+                return 'script selector must be #script[N] or #script[id="..."]'
             index = end + 1
             continue
         if json_path[index] == ".":
@@ -196,21 +266,8 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
             index = end
             continue
         if json_path[index] == "[":
-            end = index + 1
-            quoted = False
-            escaped = False
-            while end < len(json_path):
-                char = json_path[end]
-                if escaped:
-                    escaped = False
-                elif char == "\\" and quoted:
-                    escaped = True
-                elif char == '"':
-                    quoted = not quoted
-                elif char == "]" and not quoted:
-                    break
-                end += 1
-            if end >= len(json_path):
+            end = _path_bracket_end(json_path, index + 1)
+            if end < 0:
                 return "unclosed [] path segment"
             raw = json_path[index + 1 : end]
             if digit_index.fullmatch(raw):
@@ -218,12 +275,9 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
             elif neg_index.fullmatch(raw):
                 tokens.append(("index", int(raw)))
             else:
-                try:
-                    key = json.loads(raw)
-                except (TypeError, ValueError):
-                    return "[] accepts a non-negative integer index or a JSON double-quoted string key"
-                if not isinstance(key, str):
-                    return "object key must be a JSON string"
+                key = _path_string(raw)
+                if key is _PARSE_FAILED:
+                    return "[] accepts an integer index or a single-/double-quoted string key"
                 tokens.append(("key", key))
             index = end + 1
             continue
@@ -285,13 +339,20 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                     f"{prefix} is {type(node).__name__}, cannot read object key {value!r}{hint}"
                 )
             if value not in node:
-                keys = ", ".join(str(key)[:64] for key in list(node.keys())[:20]) or "(no keys)"
-                return False, _path_error(f"{prefix}.{value} does not exist; available keys: {keys}")
+                keys = (
+                    ", ".join(str(key)[:64] for key in list(node.keys())[:20])
+                    or "(no keys)"
+                )
+                return False, _path_error(
+                    f"{prefix}.{value} does not exist; available keys: {keys}"
+                )
             node = node[value]
             prefix = _property_path(prefix, value)
         elif kind == "index":
             if not isinstance(node, list):
-                return False, _path_error(f"{prefix} is not a list; cannot index [{value}]")
+                return False, _path_error(
+                    f"{prefix} is not a list; cannot index [{value}]"
+                )
             idx = value if value >= 0 else len(node) + value
             if idx >= len(node) or idx < 0:
                 return False, _path_error(
@@ -299,28 +360,45 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                 )
             node = node[idx]
             prefix += f"[{value}]"
-        elif kind == "script":
+        elif kind in ("script", "script_id"):
             if not isinstance(node, str) or not _looks_like_html(node):
-                return False, _path_error(f"{prefix} is not HTML; cannot select embedded JSON script")
-            scripts = _embedded_json_scripts(node)
-            if value >= len(scripts):
-                available = (
-                    ", ".join(
-                        f"#script[{idx}](id={str(script['id'])[:64]!r})"
-                        for idx, script in enumerate(scripts[:10])
-                    )
-                    or "no parseable JSON script"
-                )
                 return False, _path_error(
-                    f"{prefix} has no script[{value}]; available: {available}"
+                    f"{prefix} is not HTML; cannot select embedded JSON script"
                 )
-            cand = scripts[value]
+            scripts = _embedded_json_scripts(node)
+            if kind == "script":
+                if value >= len(scripts):
+                    available = (
+                        ", ".join(
+                            f"#script[{idx}](id={str(script['id'])[:64]!r})"
+                            for idx, script in enumerate(scripts[:10])
+                        )
+                        or "no parseable JSON script"
+                    )
+                    return False, _path_error(
+                        f"{prefix} has no script[{value}]; available: {available}"
+                    )
+                cand = scripts[value]
+            else:
+                cand = next((s for s in scripts if s.get("id") == value), None)
+                if cand is None:
+                    available = (
+                        ", ".join(f"id={s['id']!r}" for s in scripts if s.get("id"))
+                        or "(no id-attributed scripts)"
+                    )
+                    return False, _path_error(
+                        f'no script[id="{value}"]; available: {available}'
+                    )
             if not cand.get("ok"):
                 return False, _path_error(
                     f"{prefix} parse_error: script content is not JSON — head: {cand.get('head', '')[:120]}"
                 )
             node = cand["value"]
-            prefix += f"{SCRIPT_MARKER}{value}]"
+            prefix += (
+                f"{SCRIPT_MARKER}{value}]"
+                if kind == "script"
+                else f"{SCRIPT_MARKER}id={json.dumps(value, ensure_ascii=False)}]"
+            )
     return True, node
 
 
@@ -328,7 +406,11 @@ def _resolve_json_path(sample: Any, json_path: str, limit: int) -> str:
     found, node = _select_json_path(sample, json_path)
     if not found:
         return _bounded_text(node, limit)
-    return _bounded_text(node, limit) if isinstance(node, str) else _bounded_json_text(node, limit)
+    return (
+        _bounded_text(node, limit)
+        if isinstance(node, str)
+        else _bounded_json_text(node, limit)
+    )
 
 
 # --- describe (bounded deep digest) ---------------------------------------------
@@ -339,15 +421,23 @@ def _digest_entry(path: str, value: Any) -> dict[str, Any]:
         return {"path": path, "type": "object", "key_count": len(value)}
     if isinstance(value, list):
         element_type = type(value[0]).__name__ if value else "unknown"
-        return {"path": path, "type": f"list<{element_type}>", "cardinality": len(value)}
+        return {
+            "path": path,
+            "type": f"list<{element_type}>",
+            "cardinality": len(value),
+        }
     if isinstance(value, str):
         if _looks_like_html(value):
             return {"path": path, "type": "html", "size": len(value)}
         if len(value) > MAX_LEAF_SAMPLE * 2:
             head = value[:MAX_LEAF_SAMPLE]
-            tail = value[-MAX_LEAF_SAMPLE // 2:]
-            return {"path": path, "type": "str", "sample": head + " …[snip]… " + tail,
-                    "length": len(value)}
+            tail = value[-MAX_LEAF_SAMPLE // 2 :]
+            return {
+                "path": path,
+                "type": "str",
+                "sample": head + " …[snip]… " + tail,
+                "length": len(value),
+            }
         return {"path": path, "type": "str", "sample": value[:MAX_LEAF_SAMPLE]}
     if value is None:
         return {"path": path, "type": "null", "sample": "null"}
@@ -361,17 +451,19 @@ def _digest_entry(path: str, value: Any) -> dict[str, Any]:
 def _array_enrichment(value: list) -> dict[str, Any]:
     """Bounded heterogeneity digest for arrays: element types, union keys with
     occurrence counts and JSON-type distributions (null counted), and the
-    first/middle/last sampled indices. Key-level scan covers ALL elements;
-    values are still only sampled via the [0] child — read -p for the rest."""
+    first/middle/last candidate indices. The shallow key/type scan covers ALL
+    elements; emitted value samples are reconciled after output-budget trimming."""
     n = len(value)
     enrichment: dict[str, Any] = {}
     type_counter: dict[str, int] = {}
     for el in value:
         name = type(el).__name__
         type_counter[name] = type_counter.get(name, 0) + 1
-    enrichment["element_types"] = dict(sorted(type_counter.items(), key=lambda kv: (-kv[1], kv[0])))
+    enrichment["element_types"] = dict(
+        sorted(type_counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
     if any(isinstance(el, dict) for el in value):
-        union: dict[str, dict[str, int]] = {}
+        union: dict[str, dict[str, Any]] = {}
         for el in value:
             if not isinstance(el, dict):
                 continue
@@ -383,15 +475,21 @@ def _array_enrichment(value: list) -> dict[str, Any]:
         ordered = sorted(union.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
         shown = ordered[:MAX_UNION_KEYS]
         enrichment["union_keys"] = {
-            k: {"count": c["count"], "types": sorted(c["types"])} for k, c in shown
+            k: {
+                "count": c["count"],
+                "types": sorted(c["types"]),
+                "type_counts": dict(sorted(c["types"].items())),
+            }
+            for k, c in shown
         }
         if len(ordered) > MAX_UNION_KEYS:
             enrichment["union_keys_truncated"] = True
             enrichment["union_keys_omitted"] = len(ordered) - MAX_UNION_KEYS
     mid = n // 2
-    sampled = sorted({0, mid, n - 1})
+    sampled = sorted({0, mid, n - 1}) if n else []
     enrichment["sampled_indices"] = sampled
     enrichment["unsampled_count"] = n - len(sampled)
+    enrichment["scanned_count"] = n
     return enrichment
 
 
@@ -416,7 +514,9 @@ def _append_digest_entry(
     return True
 
 
-def _mark_digest_truncated(entry: dict[str, Any], state: dict[str, Any], omitted: int) -> None:
+def _mark_digest_truncated(
+    entry: dict[str, Any], state: dict[str, Any], omitted: int
+) -> None:
     entry["truncated"] = True
     state["truncated"] = True
     state["reason"] = state["reason"] or "depth_limit"
@@ -450,14 +550,20 @@ def _walk_digest(
             for key in keys[:MAX_DIGEST_WIDTH]:
                 if not isinstance(key, str):
                     continue
-                if PAGINATION_KEY_RE.search(key) and len(state.get("pagination_candidates", [])) < PAGINATION_CANDIDATE_CAP:
+                if (
+                    PAGINATION_KEY_RE.search(key)
+                    and len(state.get("pagination_candidates", []))
+                    < PAGINATION_CANDIDATE_CAP
+                ):
                     cv = value[key]
                     if isinstance(cv, (str, int, float, bool)) or cv is None:
-                        state.setdefault("pagination_candidates", []).append({
-                            "path": _property_path(path, key),
-                            "type": _json_type_name(cv),
-                            "sample": _bounded_text(str(cv), 60),
-                        })
+                        state.setdefault("pagination_candidates", []).append(
+                            {
+                                "path": _property_path(path, key),
+                                "type": _json_type_name(cv),
+                                "sample": _bounded_text(str(cv), 60),
+                            }
+                        )
                 child_path = _property_path(path, key)
                 if len(child_path) > 512:
                     omitted += 1
@@ -473,10 +579,11 @@ def _walk_digest(
         if value and depth >= MAX_DIGEST_DEPTH:
             _mark_digest_truncated(entry, state, len(value))
         elif value:
-            children.append((f"{path}[0]", value[0]))
-            if len(value) > 1:
-                entry["sample_count"] = 1
             entry.update(_array_enrichment(value))
+            children.extend(
+                (f"{path}[{index}]", value[index]) for index in entry["sampled_indices"]
+            )
+            entry["sample_count"] = len(children)
     elif isinstance(value, str) and _looks_like_html(value):
         if depth >= MAX_DIGEST_DEPTH:
             scripts = _embedded_json_scripts(value)
@@ -543,14 +650,65 @@ def _legacy_shape_summary(sample: Any) -> dict[str, Any]:
     return {"shape": "scalar", "sample": str(response)[:MAX_LEAF_SAMPLE]}
 
 
-def describe_data(sample_path: str | Path, *, json_path: str = "") -> dict[str, Any]:
+def _describe_keys(sample: Any, root_path: str) -> dict[str, Any]:
+    if not isinstance(sample, dict):
+        return {
+            "error": f"--keys needs an object; {root_path} is {_json_type_name(sample)}"
+        }
+    result: dict[str, Any] = {
+        "path": root_path,
+        "type": "object",
+        "key_count": len(sample),
+        "keys": [],
+        "shown": 0,
+        "omitted_count": len(sample),
+        "truncated": False,
+    }
+    size = len(json.dumps(result, ensure_ascii=False))
+    for key in sample:
+        extra = len(json.dumps(key, ensure_ascii=False)) + 2
+        if size + extra > MAX_DIGEST_OUTPUT_CHARS - 256:
+            break
+        result["keys"].append(key)
+        size += extra
+    shown = len(result["keys"])
+    result.update(
+        shown=shown, omitted_count=len(sample) - shown, truncated=shown < len(sample)
+    )
+    if result["truncated"]:
+        result["truncation_reason"] = "output_limit"
+    return result
+
+
+def describe_data(
+    sample_path: str | Path, *, json_path: str = "", keys_only: bool = False
+) -> dict[str, Any]:
     """Return a bounded deep path map compatible with ``read --json-path``."""
     sample = _load_sample(sample_path)
     if json_path:
         found, sample = _select_json_path(sample, json_path)
         if not found:
             return {"error": sample, "entries": [], "truncated": False}
+    if keys_only:
+        return _describe_keys(sample, json_path or "$")
     return _describe_value(sample, json_path or "$")
+
+
+def _refresh_array_samples(entries: list[dict[str, Any]]) -> None:
+    paths = {entry["path"] for entry in entries}
+    for entry in entries:
+        if "cardinality" not in entry:
+            continue
+        emitted = [
+            index
+            for index in entry.get("sampled_indices", [])
+            if f"{entry['path']}[{index}]" in paths
+        ]
+        entry.update(
+            sampled_indices=emitted,
+            sample_count=len(emitted),
+            unsampled_count=entry["cardinality"] - len(emitted),
+        )
 
 
 def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
@@ -564,15 +722,15 @@ def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
     }
     entries: list[dict[str, Any]] = []
     _walk_digest(root_path, sample, entries, depth=0, state=state)
+    _refresh_array_samples(entries)
     summary: dict[str, Any] = (
         {"shape": "text", "sample": sample[:MAX_LEAF_SAMPLE]}
         if isinstance(sample, str)
         else _legacy_shape_summary(sample)
     )
-    while (
-        max(len(json.dumps(summary, ensure_ascii=False)), len(str(summary))) > 8_000
-        and summary.get("keys")
-    ):
+    while max(
+        len(json.dumps(summary, ensure_ascii=False)), len(str(summary))
+    ) > 8_000 and summary.get("keys"):
         summary["keys"].pop()
         state["truncated"] = True
         state["omitted"] += 1
@@ -583,6 +741,8 @@ def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
         "truncated": state["truncated"],
         "omitted_count": state["omitted"],
     }
+    if isinstance(sample, str) and _looks_like_html(sample):
+        result["html_structure"] = _html_structure(sample)
     if state["reason"]:
         result["truncation_reason"] = state["reason"]
     if state.get("pagination_candidates"):
@@ -592,10 +752,12 @@ def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
             "has_more/total/token patterns; semantics are NOT inferred"
         )
     while (
-        max(len(json.dumps(result, ensure_ascii=False)), len(str(result))) > MAX_DIGEST_OUTPUT_CHARS
+        max(len(json.dumps(result, ensure_ascii=False)), len(str(result)))
+        > MAX_DIGEST_OUTPUT_CHARS
         and entries
     ):
         entries.pop()
+        _refresh_array_samples(entries)
         result["truncated"] = True
         result["omitted_count"] += 1
         result["truncation_reason"] = "output_limit"
@@ -605,7 +767,9 @@ def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
 # --- read (bounded slice) --------------------------------------------------------
 
 
-def read_sample(sample_path: str | Path, limit: int = DEFAULT_READ_LIMIT, json_path: str = "") -> str | None:
+def read_sample(
+    sample_path: str | Path, limit: int = DEFAULT_READ_LIMIT, json_path: str = ""
+) -> str | None:
     """Read a bounded raw or selected sample fragment (all modes honor ``limit``).
 
     ``json_path`` copies a path emitted by ``describe``: ``$``, ``.identifier``,
@@ -664,44 +828,74 @@ def batch_read(sample_path: str | Path, paths: list[str], limit: int) -> dict:
             value = _bounded_text(node, limit, truncated=len(node) > limit)
         else:
             value = _bounded_json_text(node, limit)
-        results.append({"path": jp, "ok": True, "type": _json_type_name(node), "value": value})
-    return {"file": str(sample_path), "count": len(results), "results": results}
+        results.append(
+            {"path": jp, "ok": True, "type": _json_type_name(node), "value": value}
+        )
+    return {
+        "file": str(sample_path),
+        "count": len(results),
+        "shown": len(results),
+        "omitted": 0,
+        "results": results,
+    }
 
 
-def batch_describe_data(sample_path: str | Path, paths: list[str]) -> dict:
-    """Describe many subtrees in one pass.
+def batch_describe_data(
+    sample_path: str | Path, paths: list[str], *, keys_only: bool = False
+) -> dict:
+    """Describe subtrees from one file load, charging the full serialized envelope.
 
-    Returns {"file", "count", "results": [{path, ok, describe} | {path, ok, error}]}.
-    Per-path misses never abort the batch. Total output is size-capped at
-    BATCH_TOTAL_CHARS: once the budget is exhausted, remaining paths come back
-    as ok entries with omitted=True and describe=None — split the path list
-    across calls instead of raising limits.
+    Omitted descriptions are not successful observations. Metadata placeholders
+    are retained when they fit; top-level coverage counts exclude placeholders.
     """
+    sample = _load_sample(sample_path)
     results: list[dict[str, Any]] = []
-    total = len(json.dumps({"file": str(sample_path), "count": 0, "results": []}, ensure_ascii=False))
+    payload: dict[str, Any] = {
+        "file": str(sample_path),
+        "count": len(paths),
+        "shown": len(paths),
+        "omitted": len(paths),
+        "results": results,
+    }
+    # Maximum-width counts plus room for final truncation flags.
+    total = len(json.dumps(payload, ensure_ascii=False)) + 100
     exhausted = False
     for jp in paths:
-        if exhausted:
-            results.append({"path": jp, "ok": True, "omitted": True, "describe": None})
-            continue
-        describe = describe_data(sample_path, json_path=jp)
-        if "error" in describe:
-            results.append({"path": jp, "ok": False, "error": describe["error"]})
-            continue
-        blob = json.dumps(describe, ensure_ascii=False)
-        if total + len(blob) > BATCH_TOTAL_CHARS:
+        found, node = _select_json_path(sample, jp)
+        if not found:
+            row = {"path": jp, "ok": False, "error": _bounded_text(node, 400)}
+        elif exhausted:
+            row = {"path": jp, "omitted": True, "describe": None}
+        else:
+            describe = (
+                _describe_keys(node, jp) if keys_only else _describe_value(node, jp)
+            )
+            row = (
+                {"path": jp, "ok": False, "error": describe["error"]}
+                if "error" in describe
+                else {"path": jp, "ok": True, "describe": describe}
+            )
+        cost = len(json.dumps(row, ensure_ascii=False)) + 2
+        if total + cost > BATCH_TOTAL_CHARS:
             exhausted = True
-            results.append({"path": jp, "ok": True, "omitted": True, "describe": None})
-            continue
-        total += len(blob) + 1
-        results.append({"path": jp, "ok": True, "describe": describe})
-    return {"file": str(sample_path), "count": len(results), "results": results}
+            row = {"path": jp, "omitted": True, "describe": None}
+            cost = len(json.dumps(row, ensure_ascii=False)) + 2
+        if total + cost > BATCH_TOTAL_CHARS:
+            break
+        total += cost
+        results.append(row)
+    shown = sum(not row.get("omitted", False) for row in results)
+    payload.update(shown=shown, omitted=len(paths) - shown)
+    if payload["omitted"]:
+        payload.update(truncated=True, truncation_reason="output_limit")
+    return payload
 
 
 # --- -x channel (XPath over HTML; optional parsel dependency) ---------------------
 
 
 SELECT_MATCH_SHOW = 30
+MAX_MATCH_SHOW = 200
 
 
 def _xpath_install_hint() -> str:
@@ -738,55 +932,173 @@ def _resolve_html_source(sample: Any, container: str):
     }
 
 
-def _xpath_eval(html: str, xpath: str):
-    """Run one XPath via parsel. Returns (result, None) or (None, error_dict);
-    (None, None) means the optional parsel dependency is missing."""
+def _html_root(sample: Any, container: str = "") -> tuple[Any, dict[str, str] | None]:
+    """Parse once per document; (None, None) denotes the optional dependency miss."""
+    html, error = _resolve_html_source(sample, container)
+    if error is not None:
+        return None, error
     try:
         from parsel import Selector
     except ImportError:
         return None, None
-    try:
-        return Selector(text=html).xpath(xpath), None
-    except ValueError as exc:
-        message = str(exc).replace("XPath error: ", "")
-        return None, {"error": f"XPath error: {message} — check the expression (see --help for examples)"}
+    return Selector(text=html or "<html></html>").root, None
 
 
-def _xpath_scalar(result: list):
-    """count()/number() wrap numeric scalars in Selector objects — detect by root type.
-    str is deliberately excluded: //text() nodes also produce str roots."""
-    if result:
-        root = getattr(result[0], "root", result[0])
-        if isinstance(root, (int, float, bool)):
-            return root
-    return None
+def _xpath_text(node: Any) -> str:
+    text = str(node) if isinstance(node, str) else str(node.xpath("string(.)"))
+    return " ".join(text.split())
 
 
-def _xpath_matches(sample: Any, xpath: str, container: str):
-    """Resolve the HTML source then run one XPath expression.
+def _xpath_result(
+    root: Any,
+    xpath: str,
+    *,
+    limit: int,
+    show: int,
+    attr: str | None = None,
+    html_mode: bool = False,
+    values_only: bool = False,
+) -> dict[str, Any]:
+    """One extraction contract for single, grouped and cross-file XPath reads.
 
-    ``container`` is an optional $-path addressing an HTML string inside a JSON
-    capture. Returns ``(matches, error)``: ``matches`` is None when the optional
-    parsel dependency is missing (caller prints the install hint); ``error`` is
-    a guidance dict for unusable sources.
+    Evaluate the native result before parsel stringifies scalars: XPath strings
+    and node-set text/attributes must not be confused just because both are str.
     """
-    html, err = _resolve_html_source(sample, container)
-    if err is not None:
-        return None, err
-    matches, err = _xpath_eval(html, xpath)
-    if err is not None:
-        return None, err
-    if matches is None:
-        return None, None
-    return matches, None
+    import lxml.etree as etree
+
+    try:
+        result = root.xpath(xpath, smart_strings=True)
+    except (etree.XPathError, ValueError, TypeError) as exc:
+        return {
+            "error": _bounded_text(f"XPath error: {exc} — check the expression", 400)
+        }
+    if not isinstance(result, list):
+        if attr is not None or html_mode:
+            return {
+                "error": "XPath returns a scalar; remove --attr/--html (use --text or no output flag)"
+            }
+        if isinstance(result, float) and not math.isfinite(result):
+            return {
+                "error": "XPath returned NaN/Infinity; check the numeric conversion"
+            }
+        value = _bounded_text(str(result), limit) if isinstance(result, str) else result
+        payload = {"value": value, "type": _json_type_name(result)}
+        if isinstance(result, str) and len(result) > limit:
+            payload.update(truncated=True, truncation_reason="value_limit")
+        return payload
+
+    selected = result[:show]
+    items: list[Any] = []
+    truncated_value_indices: list[int] = []
+    for index, node in enumerate(selected):
+        if not isinstance(node, str) and not hasattr(node, "tag"):
+            return {
+                "error": "XPath returned unsupported node values; select elements, text() or @attributes"
+            }
+        if attr is not None:
+            attributes = getattr(node, "attrib", None)
+            if attributes is not None:
+                value = attributes.get(attr, "")
+            elif (
+                getattr(node, "is_attribute", False)
+                and getattr(node, "attrname", None) == attr
+            ):
+                value = str(node)  # /@href already extracted the requested href.
+            else:
+                return {
+                    "error": (
+                        f"--attr {attr} needs elements or matching /@{attr} results; "
+                        "XPath already returns text/attributes. Remove --attr and use --text, "
+                        "or select the element before extracting an attribute."
+                    )
+                }
+        elif html_mode:
+            if isinstance(node, str):
+                return {
+                    "error": "--html needs element matches for outer markup; select elements or use --text for attribute/text values"
+                }
+            value = etree.tostring(
+                node, encoding="unicode", method="html", with_tail=False
+            )
+        else:
+            value = _xpath_text(node)
+        if len(value) > limit:
+            truncated_value_indices.append(index)
+        text = _bounded_text(value, limit)
+        if values_only or attr is not None or html_mode:
+            items.append(text)
+        else:
+            tag = getattr(node, "tag", "#text")
+            items.append(
+                {
+                    "index": index,
+                    "tag": tag if isinstance(tag, str) else "#comment",
+                    "attrs": {
+                        key: _bounded_text(val, limit)
+                        for key, val in getattr(node, "attrib", {}).items()
+                    },
+                    "text": text,
+                }
+            )
+    payload = {
+        "count": len(result),
+        "shown": len(items),
+        "omitted": len(result) - len(items),
+        "values" if values_only or attr is not None or html_mode else "matches": items,
+    }
+    if len(result) > len(items):
+        payload.update(truncated=True, truncation_reason="match_limit")
+    if truncated_value_indices:
+        payload["truncated_value_indices"] = truncated_value_indices
+        payload["values_truncated"] = len(truncated_value_indices)
+    return payload
+
+
+def _fit_output_budget(
+    payload: dict[str, Any], budget: int = BATCH_TOTAL_CHARS
+) -> dict[str, Any]:
+    """Cap actual serialized JSON characters, preserving counts for every omission."""
+    while len(json.dumps(payload, ensure_ascii=False)) > budget:
+        payload.update(truncated=True, truncation_reason="output_limit")
+        rows = payload.get("results", payload.get("scripts"))
+        row = rows[-1] if rows else payload
+        items = row.get("values", row.get("matches"))
+        if items:
+            items.pop()
+            row.update(
+                shown=len(items),
+                omitted=row["count"] - len(items),
+                truncated=True,
+                truncation_reason="output_limit",
+            )
+            if "truncated_value_indices" in row:
+                row["truncated_value_indices"] = [
+                    i for i in row["truncated_value_indices"] if i < len(items)
+                ]
+                row["values_truncated"] = len(row["truncated_value_indices"])
+        elif rows:
+            rows.pop()
+            total = payload.get("file_count", payload.get("count", 0))
+            payload.update(shown=len(rows), omitted=total - len(rows))
+        else:
+            return {
+                "error": "result metadata exceeds the output budget; use shorter paths or fewer expressions",
+                "truncated": True,
+                "truncation_reason": "output_limit",
+            }
+    return payload
 
 
 # --- CLI -------------------------------------------------------------------------
 
 
 class _Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:  # noqa: D401 - argparse hook
+    def error(self, message: str) -> NoReturn:
         # Agent contract: never a usage dump / traceback; one guidance line, exit 1.
+        if "not allowed with argument" in message and any(
+            flag in message for flag in ("--html", "--text", "--attr")
+        ):
+            message += "; choose one output mode for the entire grouped call; use separate calls for different modes"
         print(f"[inspect_sample] {message} — run with --help for usage")
         raise SystemExit(1)
 
@@ -807,7 +1119,7 @@ def _gather_paths(args: argparse.Namespace) -> list[str]:
             line = line.strip()
             if line and not line.startswith("#"):
                 paths.append(line)
-    for group in (args.json_path or []):
+    for group in args.json_path or []:
         if isinstance(group, list):
             paths.extend(p.strip() for p in group if isinstance(p, str) and p.strip())
         elif isinstance(group, str) and group.strip():
@@ -816,40 +1128,132 @@ def _gather_paths(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _Parser(prog="inspect_sample.py", description="Bounded structure inspection of a captured response file.")
+    parser = _Parser(
+        prog="inspect_sample.py",
+        description="Bounded structure inspection of a captured response file.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     p_describe = sub.add_parser(
-        "describe", aliases=["batch_describe"],
-        help="bounded path->type->sample map: whole file, one subtree, a path list, or XPath over HTML")
+        "describe",
+        aliases=["batch_describe"],
+        help="bounded path->type->sample map: whole file, one subtree, a path list, or XPath over HTML",
+    )
     p_describe.add_argument("file", help="response file (JSON or HTML)")
-    p_describe.add_argument("-p", "--json-path", action="append", nargs="*", default=[],
-                            help="one or more subtree json_paths per occurrence; repeatable")
-    p_describe.add_argument("-x", "--xpath", default="",
-                            help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)")
-    p_describe.add_argument("--paths-file", default=None,
-                            help="text file with one json_path per line (# comments and blank lines allowed)")
-    p_describe.add_argument("--scripts", action="store_true",
-                            help="HTML only: enumerate embedded JSON #script[n] blocks (id/type/size) without walking them")
+    p_describe.add_argument(
+        "-p",
+        "--json-path",
+        action="append",
+        nargs="*",
+        default=[],
+        help="one or more subtree json_paths per occurrence; repeatable",
+    )
+    p_describe.add_argument(
+        "-x",
+        "--xpath",
+        default=None,
+        help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)",
+    )
+    p_describe.add_argument(
+        "--paths-file",
+        default=None,
+        help="text file with one json_path per line (# comments and blank lines allowed)",
+    )
+    describe_modes = p_describe.add_mutually_exclusive_group()
+    describe_modes.add_argument(
+        "--scripts",
+        action="store_true",
+        help="HTML only: enumerate inline script candidates and stable id_paths without walking them",
+    )
+    describe_modes.add_argument(
+        "--keys",
+        action="store_true",
+        help="object only: bounded key names without descending into values; works with -p and path lists",
+    )
     p_read = sub.add_parser(
-        "read", aliases=["batch", "batch_read"],
-        help="bounded slice of one subtree, per-path values for a path list, or XPath matches over HTML")
-    p_read.add_argument("file", nargs="?", default=None,
-                        help="response file (JSON or HTML); omit only in --files batch mode")
-    p_read.add_argument("-p", "--json-path", action="append", nargs="*", default=[],
-                        help="one or more json_paths per occurrence; repeatable")
-    p_read.add_argument("-x", "--xpath", action="append", nargs="*", default=[],
-                        help="XPath over HTML instead of $ paths (optional parsel); repeatable = grouped per-expression results; one -p container allowed for JSON captures")
-    p_read.add_argument("--paths-file", default=None,
-                        help="text file with one json_path per line (# comments and blank lines allowed)")
-    p_read.add_argument("--files", action="append", nargs="*", default=[],
-                        help="one or more glob patterns per occurrence; repeatable — every matching file is processed")
+        "read",
+        aliases=["batch", "batch_read"],
+        help="bounded slice of one subtree, per-path values for a path list, or XPath matches over HTML",
+    )
+    p_read.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="response file (JSON or HTML); omit only in --files batch mode",
+    )
+    p_read.add_argument(
+        "-p",
+        "--json-path",
+        action="append",
+        nargs="*",
+        default=[],
+        help="one or more json_paths per occurrence; repeatable",
+    )
+    p_read.add_argument(
+        "-x",
+        "--xpath",
+        action="append",
+        nargs="*",
+        default=None,
+        help="XPath over HTML instead of $ paths (optional parsel); repeatable = grouped per-expression results; one -p container allowed for JSON captures",
+    )
+    p_read.add_argument(
+        "--paths-file",
+        default=None,
+        help="text file with one json_path per line (# comments and blank lines allowed)",
+    )
+    p_read.add_argument(
+        "--files",
+        action="append",
+        nargs="*",
+        default=[],
+        help="one or more glob patterns per occurrence; repeatable — every matching file is processed",
+    )
     x_group = p_read.add_mutually_exclusive_group()
-    x_group.add_argument("--attr", default=None, help="with -x: extract this attribute from every match")
-    x_group.add_argument("--text", action="store_true", help="with -x: extract each match's text content")
-    x_group.add_argument("--html", action="store_true", help="with -x: extract each match's outer HTML")
-    p_read.add_argument("--limit", default=None,
-                        help=f"max characters per result (single mode default {DEFAULT_READ_LIMIT}; list mode default {BATCH_VALUE_LIMIT}; 1..{MAX_READ_SAMPLE_CHARS})")
+    x_group.add_argument(
+        "--attr", default=None, help="with -x: extract this attribute from every match"
+    )
+    x_group.add_argument(
+        "--text", action="store_true", help="with -x: extract each match's text content"
+    )
+    x_group.add_argument(
+        "--html", action="store_true", help="with -x: extract each match's outer HTML"
+    )
+    p_read.add_argument(
+        "--limit",
+        default=None,
+        help=f"characters per value (single default {DEFAULT_READ_LIMIT}; lists/XPath {BATCH_VALUE_LIMIT}; positive values clamp {LIMIT_MIN}..{MAX_READ_SAMPLE_CHARS})",
+    )
+    for command in (p_read, p_describe):
+        command.add_argument(
+            "--show",
+            default=None,
+            help=f"with -x: matches shown per expression (default {SELECT_MATCH_SHOW}; clamp 1..{MAX_MATCH_SHOW})",
+        )
     args = parser.parse_args(argv)
+    if args.xpath is not None:
+        groups = [[args.xpath]] if isinstance(args.xpath, str) else args.xpath
+        if any(
+            not group or any(not expression.strip() for expression in group)
+            for group in groups
+        ):
+            print(
+                "[inspect_sample] -x needs a non-empty XPath expression in every occurrence"
+            )
+            return 1
+    show = SELECT_MATCH_SHOW
+    if args.show is not None:
+        if not args.xpath:
+            print("[inspect_sample] --show controls XPath matches; pair it with -x")
+            return 1
+        try:
+            show = int(str(args.show).strip())
+        except ValueError:
+            print("[inspect_sample] --show must be a positive integer")
+            return 1
+        if show < 1:
+            print("[inspect_sample] --show must be a positive integer")
+            return 1
+        show = min(show, MAX_MATCH_SHOW)
 
     if not args.file and not getattr(args, "files", None):
         print("[inspect_sample] file is required (or use --files for batch mode)")
@@ -860,13 +1264,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         if args.command in ("describe", "batch_describe"):
+            assert (
+                path is not None
+            )  # Only read accepts --files without a positional file.
             legacy_batch = args.command == "batch_describe"
+            if args.keys and args.xpath:
+                print(
+                    "[inspect_sample] --keys describes JSON object keys; use -p, not -x"
+                )
+                return 1
             if getattr(args, "scripts", False):
                 sample = _load_sample(path)
                 if not (isinstance(sample, str) and _looks_like_html(sample)):
-                    print(json.dumps({
-                        "error": "this file did not parse as HTML — --scripts enumerates embedded JSON <script> blocks in HTML captures"
-                    }, ensure_ascii=False))
+                    print(
+                        json.dumps(
+                            {
+                                "error": "this file did not parse as HTML — --scripts enumerates embedded JSON <script> blocks in HTML captures"
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
                     return 1
                 scripts = _embedded_json_scripts(sample)
                 listing = []
@@ -878,79 +1295,128 @@ def main(argv: list[str] | None = None) -> int:
                         "length": s["length"],
                         "parse_error": bool(s.get("parse_error")),
                     }
+                    if s.get("id") is not None:
+                        row["id_path"] = (
+                            f"$#script[id={json.dumps(s['id'], ensure_ascii=False)}]"
+                        )
                     if s.get("ok"):
-                        row["json_bytes"] = len(json.dumps(s["value"], ensure_ascii=False))
+                        row["json_bytes"] = s["byte_length"]
                     else:
                         row["head"] = s.get("head", "")
                     listing.append(row)
-                print(json.dumps({"file": str(path), "count": len(listing), "scripts": listing}, ensure_ascii=False))
+                payload = {
+                    "file": str(path),
+                    "count": len(listing),
+                    "shown": len(listing),
+                    "omitted": 0,
+                    "scripts": listing,
+                }
+                print(
+                    json.dumps(
+                        _fit_output_budget(payload, MAX_DIGEST_OUTPUT_CHARS),
+                        ensure_ascii=False,
+                    )
+                )
                 return 0
             if args.xpath:
                 if legacy_batch:
-                    print("[inspect_sample] the -x channel is a plain `describe` feature — batch aliases do not carry it")
+                    print(
+                        "[inspect_sample] the -x channel is a plain `describe` feature — batch aliases do not carry it"
+                    )
                     return 1
                 containers = _gather_paths(args)
                 if len(containers) > 1:
-                    print("[inspect_sample] the -x channel takes at most one -p container path")
+                    print(
+                        "[inspect_sample] the -x channel takes at most one -p container path"
+                    )
                     return 1
                 sample = _load_sample(path)
-                matches, err = _xpath_matches(sample, args.xpath, containers[0] if containers else "")
-                if matches is None and err is None:
+                root, err = _html_root(sample, containers[0] if containers else "")
+                if root is None and err is None:
                     print(f"[inspect_sample] {_xpath_install_hint()}")
                     return 1
                 if err is not None:
                     print(json.dumps(err, ensure_ascii=False))
                     return 1
-                jsonified = [
-                    {
-                        "tag": getattr(m.root, "tag", "#text"),
-                        "attrs": dict(getattr(m.root, "attrib", {})),
-                        "text": _bounded_text(" ".join(" ".join(m.css("::text").getall()).split()), BATCH_VALUE_LIMIT),
-                    }
-                    for m in matches[:SELECT_MATCH_SHOW]
-                ]
-                print(json.dumps(
-                    _describe_value({"count": len(matches), "matches": jsonified}, "$"),
-                    ensure_ascii=False,
-                ))
+                result = _xpath_result(
+                    root, args.xpath, limit=BATCH_VALUE_LIMIT, show=show
+                )
+                if "error" in result:
+                    print(json.dumps(result, ensure_ascii=False))
+                    return 1
+                print(json.dumps(_describe_value(result, "$"), ensure_ascii=False))
                 return 0
             paths = _gather_paths(args)
             if not paths:
                 if legacy_batch:
-                    print("[inspect_sample] no paths given — use -p/--json-path or --paths-file")
+                    print(
+                        "[inspect_sample] no paths given — use -p/--json-path or --paths-file"
+                    )
                     return 1
-                print(json.dumps(describe_data(path), ensure_ascii=False))
-                return 0
+                result = describe_data(path, keys_only=args.keys)
+                print(json.dumps(result, ensure_ascii=False))
+                return 1 if args.keys and "error" in result else 0
             if len(paths) == 1 and not legacy_batch:
-                print(json.dumps(describe_data(path, json_path=paths[0]), ensure_ascii=False))
-                return 0
-            print(json.dumps(batch_describe_data(path, paths), ensure_ascii=False))
+                result = describe_data(path, json_path=paths[0], keys_only=args.keys)
+                print(json.dumps(result, ensure_ascii=False))
+                return 1 if args.keys and "error" in result else 0
+            print(
+                json.dumps(
+                    batch_describe_data(path, paths, keys_only=args.keys),
+                    ensure_ascii=False,
+                )
+            )
             return 0
         if args.command in ("read", "batch", "batch_read"):
             legacy_batch = args.command != "read"
+            if (args.attr is not None or args.text or args.html) and not args.xpath:
+                print(
+                    "[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x"
+                )
+                return 1
             if getattr(args, "files", None):
                 if legacy_batch:
-                    print("[inspect_sample] batch mode (--files) is a plain `read` feature — batch aliases do not carry it")
+                    print(
+                        "[inspect_sample] batch mode (--files) is a plain `read` feature — batch aliases do not carry it"
+                    )
                     return 1
                 paths = _gather_paths(args)
-                xpaths = [x.strip() for occ in (args.xpath or [])
-                          for x in (occ if isinstance(occ, list) else [occ])
-                          if isinstance(x, str) and x.strip()]
+                xpaths = [
+                    x.strip()
+                    for occ in (args.xpath or [])
+                    for x in (occ if isinstance(occ, list) else [occ])
+                    if isinstance(x, str) and x.strip()
+                ]
                 xpaths = list(dict.fromkeys(xpaths))
                 if xpaths and paths:
-                    print("[inspect_sample] batch -x takes no -p container — one -x per call")
+                    print(
+                        "[inspect_sample] batch -x takes no -p container — one -x per call"
+                    )
                     return 1
                 if len(xpaths) > 1:
-                    print("[inspect_sample] batch -x is a single expression per call — use --files with one -x, or drop --files for grouped -x")
+                    print(
+                        "[inspect_sample] batch -x is a single expression per call — use --files with one -x, or drop --files for grouped -x"
+                    )
                     return 1
                 if not xpaths and len(paths) != 1:
-                    print("[inspect_sample] batch mode needs exactly one -p path (or one -x XPath)")
+                    print(
+                        "[inspect_sample] batch mode needs exactly one -p path (or one -x XPath)"
+                    )
                     return 1
                 patterns = [pat for occ in (args.files or []) for pat in occ]
                 if not patterns:
-                    print("[inspect_sample] batch mode needs at least one --files glob pattern")
+                    print(
+                        "[inspect_sample] batch mode needs at least one --files glob pattern"
+                    )
                     return 1
-                files = sorted({f for pat in patterns for f in glob.glob(pat)})
+                files = sorted(
+                    {
+                        str(Path(f).resolve())
+                        for pat in patterns
+                        for f in glob.glob(pat)
+                        if Path(f).is_file()
+                    }
+                )
                 if not files:
                     print(f"[inspect_sample] no files match: {', '.join(patterns)}")
                     return 1
@@ -961,54 +1427,57 @@ def main(argv: list[str] | None = None) -> int:
                 glob_root = os.path.dirname(patterns[0])
                 results = []
                 shown = 0
-                budget_spent = 0
                 type_summary: dict[str, int] = {}
                 for fp in files:
                     rel = os.path.relpath(fp, glob_root) if glob_root else Path(fp).name
                     row: dict[str, Any] = {"file": rel, "path": fp}
+                    try:
+                        sample = _load_sample(fp)
+                    except OSError as exc:
+                        row.update(
+                            ok=False,
+                            error=_bounded_text(f"cannot read {fp}: {exc}", 400),
+                        )
+                        results.append(row)
+                        shown += 1
+                        continue
                     if xpaths:
-                        sample = _load_sample(fp)
-                        m, err = _xpath_matches(sample, xpaths[0], "")
-                        if m is None and err is None:
-                            row.update(ok=False, error="parsel missing")
+                        root, err = _html_root(sample)
+                        if root is None and err is None:
+                            print(f"[inspect_sample] {_xpath_install_hint()}")
+                            return 1
                         elif err is not None:
-                            row.update(ok=False, error=_bounded_text(err.get("error", ""), 300))
+                            row.update(
+                                ok=False, error=_bounded_text(err.get("error", ""), 300)
+                            )
                         else:
-                            scalar = _xpath_scalar(m)
-                            if scalar is not None:
-                                row.update(ok=True, value=scalar, type=_json_type_name(scalar))
-                            else:
-                                def text_of(mm) -> str:
-                                    r = mm.root
-                                    if isinstance(r, str) or not hasattr(r, "tag"):
-                                        return " ".join(str(r).split())
-                                    return " ".join(" ".join(mm.css("::text").getall()).split())
-                                if args.attr is not None:
-                                    values = [_bounded_text(mm.attrib.get(args.attr, ""), limit) for mm in m[:SELECT_MATCH_SHOW]]
-                                elif args.html:
-                                    values = [_bounded_text(mm.get() or "", limit) for mm in m[:SELECT_MATCH_SHOW]]
-                                else:
-                                    values = [_bounded_text(text_of(mm), limit) for mm in m[:SELECT_MATCH_SHOW]]
-                                row.update(ok=True, count=len(m), values=values)
+                            result = _xpath_result(
+                                root,
+                                xpaths[0],
+                                limit=limit,
+                                show=show,
+                                attr=args.attr,
+                                html_mode=args.html,
+                                values_only=True,
+                            )
+                            row.update(result, ok="error" not in result)
                     else:
-                        sample = _load_sample(fp)
                         found, node = _select_json_path(sample, paths[0])
                         if not found:
                             row.update(ok=False, error=_bounded_text(node, 300))
                         else:
                             tname = _json_type_name(node)
                             type_summary[tname] = type_summary.get(tname, 0) + 1
-                            row.update(ok=True, type=tname,
-                                       value=_bounded_text(
-                                           node if isinstance(node, str)
-                                           else _bounded_json_text(node, limit), limit))
-                    entry_len = len(json.dumps(row, ensure_ascii=False))
-                    if budget_spent + entry_len > BATCH_TOTAL_CHARS:
-                        row.update(omitted=True)
-                        for noisy in ("values", "value", "type", "error"):
-                            row.pop(noisy, None)
-                        entry_len = len(json.dumps(row, ensure_ascii=False))
-                    budget_spent += entry_len
+                            row.update(
+                                ok=True,
+                                type=tname,
+                                value=_bounded_text(
+                                    node
+                                    if isinstance(node, str)
+                                    else _bounded_json_text(node, limit),
+                                    limit,
+                                ),
+                            )
                     shown += 1
                     results.append(row)
                 payload = {
@@ -1020,132 +1489,113 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 if type_summary:
                     payload["type_summary"] = type_summary
-                print(json.dumps(payload, ensure_ascii=False))
+                print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
                 return 0
+            assert path is not None  # --files branches above always return.
             legacy_batch = args.command != "read"
             if args.attr is not None or args.text or args.html:
                 if not args.xpath:
-                    print("[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x")
+                    print(
+                        "[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x"
+                    )
                     return 1
                 if legacy_batch:
-                    print("[inspect_sample] the -x channel is a plain `read` feature — batch aliases do not carry it")
+                    print(
+                        "[inspect_sample] the -x channel is a plain `read` feature — batch aliases do not carry it"
+                    )
                     return 1
             if args.xpath:
                 containers = _gather_paths(args)
                 if len(containers) > 1:
-                    print("[inspect_sample] the -x channel takes at most one -p container path")
+                    print(
+                        "[inspect_sample] the -x channel takes at most one -p container path"
+                    )
                     return 1
                 limit, limit_err = _parse_limit(args.limit, BATCH_VALUE_LIMIT)
                 if limit_err:
                     print(limit_err)
                     return 1
                 sample = _load_sample(path)
-                xpaths = [x.strip() for occ in (args.xpath or [])
-                          for x in (occ if isinstance(occ, list) else [occ])
-                          if isinstance(x, str) and x.strip()]
+                xpaths = [
+                    x.strip()
+                    for occ in (args.xpath or [])
+                    for x in (occ if isinstance(occ, list) else [occ])
+                    if isinstance(x, str) and x.strip()
+                ]
                 xpaths = list(dict.fromkeys(xpaths))
-                html, src_err = _resolve_html_source(sample, containers[0] if containers else "")
+                if not xpaths:
+                    print("[inspect_sample] -x needs at least one XPath expression")
+                    return 1
+                root, src_err = _html_root(sample, containers[0] if containers else "")
                 if src_err is not None:
                     print(json.dumps(src_err, ensure_ascii=False))
                     return 1
-                try:
-                    from parsel import Selector
-                except ImportError:
+                if root is None:
                     print(f"[inspect_sample] {_xpath_install_hint()}")
                     return 1
-                sel = Selector(text=html)
-
-                def text_of(m) -> str:
-                    root = m.root
-                    if isinstance(root, str) or not hasattr(root, "tag"):
-                        return " ".join(str(root).split())
-                    return " ".join(" ".join(m.css("::text").getall()).split())
-
-                def bounded(s: str) -> str:
-                    return _bounded_text(s, limit)
-
                 if len(xpaths) == 1:
-                    xp = xpaths[0]
-                    try:
-                        matches = sel.xpath(xp)
-                    except ValueError as exc:
-                        message = str(exc).replace("XPath error: ", "")
-                        print(json.dumps({"error": f"XPath error: {message} — check the expression"}, ensure_ascii=False))
-                        return 1
-                    scalar = _xpath_scalar(matches)
-                    if scalar is not None:
-                        print(json.dumps({"file": str(path), "xpath": xp, "value": scalar, "type": _json_type_name(scalar)}, ensure_ascii=False))
-                        return 0
-                    total = len(matches)
-                    shown = matches[:SELECT_MATCH_SHOW]
-                    if args.attr is not None:
-                        values = [bounded(m.attrib.get(args.attr, "")) for m in shown]
-                    elif args.html:
-                        values = [bounded(m.get() or "") for m in shown]
-                    else:
-                        values = [bounded(text_of(m)) for m in shown]
-                    payload: dict[str, Any] = {
-                        "file": str(path), "xpath": xp,
-                        "count": total, "shown": len(shown), "omitted": total - len(shown),
-                    }
-                    if args.attr is not None or args.text or args.html:
-                        payload["values"] = values
-                    else:
-                        payload["matches"] = [
-                            {"index": i, "tag": getattr(m.root, "tag", "#text"),
-                             "attrs": dict(getattr(m.root, "attrib", {})),
-                             "text": bounded(text_of(m))}
-                            for i, m in enumerate(shown)
-                        ]
-                    print(json.dumps(payload, ensure_ascii=False))
-                    return 0
+                    result = _xpath_result(
+                        root,
+                        xpaths[0],
+                        limit=limit,
+                        show=show,
+                        attr=args.attr,
+                        html_mode=args.html,
+                        values_only=args.text,
+                    )
+                    payload = {"file": str(path), "xpath": xpaths[0], **result}
+                    print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+                    return 1 if "error" in result else 0
                 results = []
                 for xp in xpaths:
-                    try:
-                        m = sel.xpath(xp)
-                    except ValueError as exc:
-                        message = str(exc).replace("XPath error: ", "")
-                        results.append({"xpath": xp, "ok": False, "error": f"XPath error: {message}"})
-                        continue
-                    scalar = _xpath_scalar(m)
-                    if scalar is not None:
-                        results.append({"xpath": xp, "value": scalar, "type": _json_type_name(scalar)})
-                        continue
-                    results.append({"xpath": xp, "count": len(m),
-                                    "values": [bounded(text_of(mm)) for mm in m[:SELECT_MATCH_SHOW]]})
-                print(json.dumps({"file": str(path), "count": len(xpaths), "results": results}, ensure_ascii=False))
+                    result = _xpath_result(
+                        root,
+                        xp,
+                        limit=limit,
+                        show=show,
+                        attr=args.attr,
+                        html_mode=args.html,
+                        values_only=True,
+                    )
+                    results.append({"xpath": xp, "ok": "error" not in result, **result})
+                payload = {
+                    "file": str(path),
+                    "count": len(xpaths),
+                    "shown": len(results),
+                    "omitted": 0,
+                    "results": results,
+                }
+                print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
                 return 0
             paths = _gather_paths(args)
-            default_limit = BATCH_VALUE_LIMIT if (legacy_batch or len(paths) > 1) else DEFAULT_READ_LIMIT
+            default_limit = (
+                BATCH_VALUE_LIMIT
+                if (legacy_batch or len(paths) > 1)
+                else DEFAULT_READ_LIMIT
+            )
             limit, limit_err = _parse_limit(args.limit, default_limit)
             if limit_err:
                 print(limit_err)
                 return 1
             if not paths:
                 if legacy_batch:
-                    print("[inspect_sample] no paths given — use -p/--json-path or --paths-file")
+                    print(
+                        "[inspect_sample] no paths given — use -p/--json-path or --paths-file"
+                    )
                     return 1
                 out = read_sample(path, min(limit, MAX_READ_SAMPLE_CHARS))
                 if out is not None:
                     print(out)
                 return 0
             if len(paths) == 1 and not legacy_batch:
-                out = read_sample(path, min(limit, MAX_READ_SAMPLE_CHARS), json_path=paths[0])
+                out = read_sample(
+                    path, min(limit, MAX_READ_SAMPLE_CHARS), json_path=paths[0]
+                )
                 if out is not None:
                     print(out)
                 return 0
             payload = batch_read(path, paths, min(limit, MAX_READ_SAMPLE_CHARS))
-            blob = json.dumps(payload, ensure_ascii=False)
-            if len(blob) > BATCH_TOTAL_CHARS:
-                kept = 0
-                for r in payload["results"]:
-                    if r.get("ok"):
-                        kept += 1
-                        if kept > 30:
-                            r["omitted"] = True
-                            r["value"] = None
-                blob = json.dumps(payload, ensure_ascii=False)
-            print(blob)
+            print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
             return 0
         print(f"[inspect_sample] unknown command: {args.command}")
         return 1
@@ -1163,7 +1613,7 @@ if __name__ == "__main__":
         sys.exit(1)
     for _stream in (sys.stdout, sys.stderr):
         try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
+            getattr(_stream, "reconfigure")(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass  # benign: non-standard stream (e.g. captured buffer) without reconfigure
     sys.exit(main())
