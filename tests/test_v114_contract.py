@@ -569,6 +569,122 @@ class V114ContractTests(unittest.TestCase):
         self.assertIn("--text", res.stdout)
         self.assertNotIn("Traceback", res.stdout + res.stderr)
 
+    # --- bounded keyword-context search (--grep) ---------------------------------
+
+    def test_read_grep_reports_hits_with_verifiable_offsets(self) -> None:
+        res = run("read", str(self.html), "--grep", "card", "--context", "10")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        # case-insensitive: div.card ×2 in markup + "Card A"/"Card B" text
+        self.assertEqual(data["count"], 4)
+        # Read exactly what the CLI sees (bytes → utf-8-sig), no newline translation.
+        raw = self.html.read_bytes().decode("utf-8-sig", errors="replace")
+        for i, hit in enumerate(data["hits"]):
+            self.assertEqual(hit["index"], i)
+            self.assertEqual(
+                raw[hit["offset"] : hit["offset"] + len("card")].lower(), "card"
+            )
+            self.assertLessEqual(len(hit["context"]), 2 * 10 + len("card"))
+
+    def test_read_grep_is_case_insensitive_and_counts_all(self) -> None:
+        source = self.dir / "mixed-case.html"
+        source.write_text("<p>VAT</p><p>vat</p><p>VaT</p>", encoding="utf-8")
+        res = run("read", str(source), "--grep", "vat", "--context", "4")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 3)
+
+    def test_read_grep_show_caps_matches_and_discloses_omission(self) -> None:
+        self.html.write_text(
+            "<html>" + "<p>needle</p>" * 50 + "</html>", encoding="utf-8"
+        )
+        res = run("read", str(self.html), "--grep", "needle", "--show", "3")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 50)
+        self.assertEqual(data["shown"], 3)
+        self.assertEqual(data["omitted"], 47)
+        self.assertEqual(len(data["hits"]), 3)
+        self.assertTrue(data["truncated"])
+
+    def test_read_grep_works_on_minified_single_line_html(self) -> None:
+        single = (
+            "<html><body>"
+            + "<th>单价<div>（含 13% 增值税）</div></th><td>9.9</td>" * 2
+            + "</body></html>"
+        )
+        source = self.dir / "minified.html"
+        source.write_text(single, encoding="utf-8")
+        res = run("read", str(source), "--grep", "增值税", "--context", "8")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 2)
+        self.assertTrue(all("增值税" in hit["context"] for hit in data["hits"]))
+        self.assertNotEqual(data["hits"][0]["offset"], data["hits"][1]["offset"])
+
+    def test_read_grep_files_batch_reports_per_file_counts(self) -> None:
+        batch = self.dir / "grepbatch"
+        batch.mkdir()
+        (batch / "a.html").write_text(
+            "<html><p>含 13% 增值税</p></html>", encoding="utf-8"
+        )
+        (batch / "b.html").write_text("<html><p>不含税</p></html>", encoding="utf-8")
+        res = run("read", "--files", str(batch / "*.html"), "--grep", "增值税")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        rows = {r["file"]: r for r in data["results"]}
+        self.assertEqual(rows["a.html"]["count"], 1)
+        self.assertEqual(rows["b.html"]["count"], 0)
+        self.assertTrue(rows["b.html"]["ok"])
+
+    def test_read_grep_rejects_empty_keyword_and_conflicting_modes(self) -> None:
+        for args in (
+            ("read", str(self.html), "--grep", ""),
+            ("read", str(self.html), "--grep", "   "),
+            ("read", str(self.html), "--grep", "vat", "-p", "$.a"),
+            ("read", str(self.html), "--grep", "vat", "-x", "//a"),
+            ("read", str(self.html), "--grep", "vat", "--text"),
+        ):
+            with self.subTest(args=args):
+                res = run(*args)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_grep_context_clamps_and_rejects_invalid(self) -> None:
+        for value in ("-1", "abc"):
+            with self.subTest(value=value):
+                res = run("read", str(self.html), "--grep", "card", "--context", value)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn("context", res.stdout)
+        self.html.write_text(
+            "<html><p>" + "y" * 900 + "needle" + "z" * 900 + "</p></html>",
+            encoding="utf-8",
+        )
+        res = run("read", str(self.html), "--grep", "needle", "--context", "999999")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        for hit in json.loads(res.stdout)["hits"]:
+            self.assertLessEqual(len(hit["context"]), 2 * 1000 + len("needle"))
+
+    def test_read_grep_huge_output_respects_total_budget(self) -> None:
+        self.html.write_text(
+            "<html>" + ("<p>" + "x" * 3000 + "needle</p>") * 60 + "</html>",
+            encoding="utf-8",
+        )
+        res = run("read", str(self.html), "--grep", "needle", "--context", "2000")
+        self.assertEqual(res.returncode, 0, res.stdout[:100] + res.stderr)
+        self.assertLessEqual(len(res.stdout.rstrip("\r\n")), 80000)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 60)
+        self.assertEqual(data["shown"] + data["omitted"], 60)
+        self.assertTrue(data["truncated"])
+
+    def test_read_grep_zero_hits_is_a_clean_empty_result(self) -> None:
+        res = run("read", str(self.html), "--grep", "does-not-exist")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 0)
+        self.assertEqual(data["hits"], [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

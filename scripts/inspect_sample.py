@@ -896,6 +896,50 @@ def batch_describe_data(
 
 SELECT_MATCH_SHOW = 30
 MAX_MATCH_SHOW = 200
+GREP_CONTEXT_DEFAULT = 80
+GREP_CONTEXT_MAX = 1000
+
+
+def _grep_hits(text: str, keyword: str, show: int, context: int) -> dict[str, Any]:
+    """Case-insensitive literal matches with bounded raw-text context windows.
+
+    Offsets are 0-based characters into the same raw text view that plain
+    ``read`` prints, so a hit can be re-sliced or XPath-located afterwards.
+    Script/style content is intentionally included: hits need surrounding-text
+    judgment, and excluding them would hide JSON-LD/payload evidence.
+    """
+    lower_text = text.lower()
+    needle = keyword.lower()
+    hits: list[dict[str, Any]] = []
+    total = 0
+    pos = 0
+    span = len(needle)
+    while True:
+        idx = lower_text.find(needle, pos)
+        if idx < 0:
+            break
+        total += 1
+        if len(hits) < show:
+            hits.append(
+                {
+                    "index": len(hits),
+                    "offset": idx,
+                    "line": text.count("\n", 0, idx) + 1,
+                    "context": text[
+                        max(0, idx - context) : min(len(text), idx + span + context)
+                    ],
+                }
+            )
+        pos = idx + span
+    result: dict[str, Any] = {
+        "count": total,
+        "shown": len(hits),
+        "omitted": total - len(hits),
+        "hits": hits,
+    }
+    if total > len(hits):
+        result.update(truncated=True, truncation_reason="match_limit")
+    return result
 
 
 def _xpath_install_hint() -> str:
@@ -1060,7 +1104,7 @@ def _fit_output_budget(
     """Cap actual serialized JSON characters, preserving counts for every omission."""
     while len(json.dumps(payload, ensure_ascii=False)) > budget:
         payload.update(truncated=True, truncation_reason="output_limit")
-        rows = payload.get("results", payload.get("scripts"))
+        rows = payload.get("results", payload.get("scripts", payload.get("hits")))
         row = rows[-1] if rows else payload
         items = row.get("values", row.get("matches"))
         if items:
@@ -1229,7 +1273,19 @@ def main(argv: list[str] | None = None) -> int:
             default=None,
             help=f"with -x: matches shown per expression (default {SELECT_MATCH_SHOW}; clamp 1..{MAX_MATCH_SHOW})",
         )
+    p_read.add_argument(
+        "--grep",
+        default=None,
+        help="case-insensitive literal keyword search over the raw text view (bounded context hits; works with --files)",
+    )
+    p_read.add_argument(
+        "--context",
+        default=None,
+        help=f"with --grep: context characters on each side of a hit (default {GREP_CONTEXT_DEFAULT}; clamp 0..{GREP_CONTEXT_MAX})",
+    )
     args = parser.parse_args(argv)
+    args.grep = getattr(args, "grep", None)
+    args.context = getattr(args, "context", None)
     if args.xpath is not None:
         groups = [[args.xpath]] if isinstance(args.xpath, str) else args.xpath
         if any(
@@ -1240,10 +1296,35 @@ def main(argv: list[str] | None = None) -> int:
                 "[inspect_sample] -x needs a non-empty XPath expression in every occurrence"
             )
             return 1
+    if args.grep is not None:
+        if not args.grep.strip():
+            print("[inspect_sample] --grep needs a non-empty literal keyword")
+            return 1
+        if args.xpath or args.attr is not None or args.text or args.html:
+            print(
+                "[inspect_sample] --grep is its own channel; it cannot be combined with -p/-x/--attr/--text/--html"
+            )
+            return 1
+    context = GREP_CONTEXT_DEFAULT
+    if args.context is not None:
+        if args.grep is None:
+            print("[inspect_sample] --context bounds --grep hits; pair it with --grep")
+            return 1
+        try:
+            context = int(str(args.context).strip())
+        except ValueError:
+            print("[inspect_sample] --context must be a non-negative integer")
+            return 1
+        if context < 0:
+            print("[inspect_sample] --context must be a non-negative integer")
+            return 1
+        context = min(context, GREP_CONTEXT_MAX)
     show = SELECT_MATCH_SHOW
     if args.show is not None:
-        if not args.xpath:
-            print("[inspect_sample] --show controls XPath matches; pair it with -x")
+        if not args.xpath and args.grep is None:
+            print(
+                "[inspect_sample] --show controls XPath/grep matches; pair it with -x or --grep"
+            )
             return 1
         try:
             show = int(str(args.show).strip())
@@ -1388,6 +1469,11 @@ def main(argv: list[str] | None = None) -> int:
                     if isinstance(x, str) and x.strip()
                 ]
                 xpaths = list(dict.fromkeys(xpaths))
+                if args.grep is not None and (paths or xpaths):
+                    print(
+                        "[inspect_sample] batch --grep takes no -p path or -x expression — one keyword per call"
+                    )
+                    return 1
                 if xpaths and paths:
                     print(
                         "[inspect_sample] batch -x takes no -p container — one -x per call"
@@ -1398,7 +1484,7 @@ def main(argv: list[str] | None = None) -> int:
                         "[inspect_sample] batch -x is a single expression per call — use --files with one -x, or drop --files for grouped -x"
                     )
                     return 1
-                if not xpaths and len(paths) != 1:
+                if not xpaths and len(paths) != 1 and args.grep is None:
                     print(
                         "[inspect_sample] batch mode needs exactly one -p path (or one -x XPath)"
                     )
@@ -1420,11 +1506,42 @@ def main(argv: list[str] | None = None) -> int:
                 if not files:
                     print(f"[inspect_sample] no files match: {', '.join(patterns)}")
                     return 1
+                glob_root = os.path.dirname(patterns[0])
+                if args.grep is not None:
+                    grep_results = []
+                    for fp in files:
+                        rel = (
+                            os.path.relpath(fp, glob_root)
+                            if glob_root
+                            else Path(fp).name
+                        )
+                        row = {"file": rel, "path": fp}
+                        try:
+                            row.update(
+                                ok=True,
+                                **_grep_hits(
+                                    _read_file_text(fp), args.grep, show, context
+                                ),
+                            )
+                        except OSError as exc:
+                            row.update(
+                                ok=False,
+                                error=_bounded_text(f"cannot read {fp}: {exc}", 400),
+                            )
+                        grep_results.append(row)
+                    payload = {
+                        "patterns": patterns,
+                        "file_count": len(files),
+                        "shown": len(grep_results),
+                        "omitted": len(files) - len(grep_results),
+                        "results": grep_results,
+                    }
+                    print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+                    return 0
                 limit, limit_err = _parse_limit(args.limit, BATCH_VALUE_LIMIT)
                 if limit_err:
                     print(limit_err)
                     return 1
-                glob_root = os.path.dirname(patterns[0])
                 results = []
                 shown = 0
                 type_summary: dict[str, int] = {}
@@ -1504,6 +1621,16 @@ def main(argv: list[str] | None = None) -> int:
                         "[inspect_sample] the -x channel is a plain `read` feature — batch aliases do not carry it"
                     )
                     return 1
+            if args.grep is not None:
+                if _gather_paths(args):
+                    print(
+                        "[inspect_sample] --grep searches the raw text view; it takes no -p path"
+                    )
+                    return 1
+                result = _grep_hits(_read_file_text(path), args.grep, show, context)
+                payload = {"file": str(path), "grep": args.grep, **result}
+                print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+                return 0
             if args.xpath:
                 containers = _gather_paths(args)
                 if len(containers) > 1:

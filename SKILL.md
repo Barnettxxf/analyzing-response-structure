@@ -110,7 +110,11 @@ python <skill_dir>/scripts/inspect_sample.py read '<html>' -p '$#script[id="app-
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' -p '$#script[id="app-state"].props.count'
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//h1' -x 'count(//tr)' --text
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//a' --html --show 50
+python <skill_dir>/scripts/inspect_sample.py read '<html>' --grep '增值税' --context 100
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --grep 'PCN' --show 5
 ```
+
+- **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants, surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
 
 - **Stable script paths:** use an observed `script_id` from `describe --scripts`; its `id_path` can be passed directly to `read -p`. `$#script[id="..."]` matches any exact, case-sensitive HTML id, with the first inline candidate in document order winning even when malformed. No site/framework aliases. Unnamed scripts remain index-addressable. Ordinary JavaScript can have `parse_error` because it is not strict JSON; it is not proof of absent data. Never execute captured scripts.
 - **Keys and structure:** `describe --keys` lists immediate object key names without descending; `key_count`, `shown` and `omitted_count` disclose coverage. HTML `describe` adds bounded tag and tag.class histograms (at most 30 groups each with omission counts). Array `type_counts`/`scanned_count` cover the shallow key/type scan; `sampled_indices` names emitted first/middle/last roots, not all nested values. Path input is capped at 2048 characters; longer enumerated names may not be addressable via `-p`.
