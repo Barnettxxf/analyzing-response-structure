@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import glob
 import json
 import math
@@ -900,44 +901,57 @@ GREP_CONTEXT_DEFAULT = 80
 GREP_CONTEXT_MAX = 1000
 
 
-def _grep_hits(text: str, keyword: str, show: int, context: int) -> dict[str, Any]:
+def _grep_hits(
+    text: str, keywords: list[str], show: int, context: int
+) -> dict[str, Any]:
     """Case-insensitive literal matches with bounded raw-text context windows.
 
     Offsets are 0-based characters into the same raw text view that plain
     ``read`` prints, so a hit can be re-sliced or XPath-located afterwards.
-    Script/style content is intentionally included: hits need surrounding-text
-    judgment, and excluding them would hide JSON-LD/payload evidence.
+    Multiple keywords merge in document order; overlapping occurrences from
+    different keywords are each reported (one keyword may be a substring of
+    another). Script/style content is intentionally included: hits need
+    surrounding-text judgment, and excluding them would hide JSON-LD/payload
+    evidence.
     """
     lower_text = text.lower()
-    needle = keyword.lower()
+    needles = [(keyword.lower(), keyword) for keyword in keywords]
+    found: list[tuple[int, str]] = []
+    for needle, original in needles:
+        pos = 0
+        while True:
+            idx = lower_text.find(needle, pos)
+            if idx < 0:
+                break
+            found.append((idx, original))
+            pos = idx + len(needle)
+    found.sort(key=lambda pair: (pair[0], pair[1]))
+    keyword_counts: dict[str, int] = {}
+    for _, original in found:
+        keyword_counts[original] = keyword_counts.get(original, 0) + 1
     hits: list[dict[str, Any]] = []
-    total = 0
-    pos = 0
-    span = len(needle)
-    while True:
-        idx = lower_text.find(needle, pos)
-        if idx < 0:
-            break
-        total += 1
-        if len(hits) < show:
-            hits.append(
-                {
-                    "index": len(hits),
-                    "offset": idx,
-                    "line": text.count("\n", 0, idx) + 1,
-                    "context": text[
-                        max(0, idx - context) : min(len(text), idx + span + context)
-                    ],
-                }
-            )
-        pos = idx + span
+    for index, (idx, original) in enumerate(found[:show]):
+        hits.append(
+            {
+                "index": index,
+                "offset": idx,
+                "line": text.count("\n", 0, idx) + 1,
+                "keyword": original,
+                "context": text[
+                    max(0, idx - context) : min(
+                        len(text), idx + len(original) + context
+                    )
+                ],
+            }
+        )
     result: dict[str, Any] = {
-        "count": total,
+        "count": len(found),
         "shown": len(hits),
-        "omitted": total - len(hits),
+        "omitted": len(found) - len(hits),
+        "keywords": dict(sorted(keyword_counts.items())),
         "hits": hits,
     }
-    if total > len(hits):
+    if len(found) > len(hits):
         result.update(truncated=True, truncation_reason="match_limit")
     return result
 
@@ -1275,8 +1289,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     p_read.add_argument(
         "--grep",
+        action="append",
         default=None,
-        help="case-insensitive literal keyword search over the raw text view (bounded context hits; works with --files)",
+        help="case-insensitive literal keyword search over the raw text view (bounded context hits; repeatable = merged multi-keyword hits; works with --files)",
+    )
+    p_read.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="with --files: exclude collected files whose name matches this pattern (repeatable)",
     )
     p_read.add_argument(
         "--context",
@@ -1297,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
     if args.grep is not None:
-        if not args.grep.strip():
+        if any(not keyword.strip() for keyword in args.grep):
             print("[inspect_sample] --grep needs a non-empty literal keyword")
             return 1
         if args.xpath or args.attr is not None or args.text or args.html:
@@ -1471,7 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
                 xpaths = list(dict.fromkeys(xpaths))
                 if args.grep is not None and (paths or xpaths):
                     print(
-                        "[inspect_sample] batch --grep takes no -p path or -x expression — one keyword per call"
+                        "[inspect_sample] batch --grep takes no -p path or -x expression — drop --files for grouped --grep"
                     )
                     return 1
                 if xpaths and paths:
@@ -1484,9 +1505,9 @@ def main(argv: list[str] | None = None) -> int:
                         "[inspect_sample] batch -x is a single expression per call — use --files with one -x, or drop --files for grouped -x"
                     )
                     return 1
-                if not xpaths and len(paths) != 1 and args.grep is None:
+                if not xpaths and not paths and args.grep is None:
                     print(
-                        "[inspect_sample] batch mode needs exactly one -p path (or one -x XPath)"
+                        "[inspect_sample] batch mode needs at least one -p path (or one -x XPath)"
                     )
                     return 1
                 patterns = [pat for occ in (args.files or []) for pat in occ]
@@ -1503,8 +1524,28 @@ def main(argv: list[str] | None = None) -> int:
                         if Path(f).is_file()
                     }
                 )
+                excludes = [
+                    pat.strip()
+                    for occ in (getattr(args, "exclude", None) or [])
+                    for pat in (occ if isinstance(occ, list) else [occ])
+                    if isinstance(pat, str) and pat.strip()
+                ]
+                if excludes:
+                    files = [
+                        f
+                        for f in files
+                        if not any(
+                            fnmatch.fnmatch(os.path.basename(f), pat)
+                            or fnmatch.fnmatch(f, pat)
+                            for pat in excludes
+                        )
+                    ]
                 if not files:
-                    print(f"[inspect_sample] no files match: {', '.join(patterns)}")
+                    print(
+                        f"[inspect_sample] no files remain after excludes: {', '.join(patterns)} | excluded by: {', '.join(excludes)}"
+                        if excludes
+                        else f"[inspect_sample] no files match: {', '.join(patterns)}"
+                    )
                     return 1
                 glob_root = os.path.dirname(patterns[0])
                 if args.grep is not None:
@@ -1545,6 +1586,99 @@ def main(argv: list[str] | None = None) -> int:
                 results = []
                 shown = 0
                 type_summary: dict[str, int] = {}
+                type_summaries: dict[str, dict[str, int]] = {}
+                if len(paths) > 1:
+                    # Multi-path matrix: nested per-file results with per-path
+                    # cross-file type summaries surfacing shape variance.
+                    matrix_results: list[dict[str, Any]] = []
+                    for fp in files:
+                        rel = (
+                            os.path.relpath(fp, glob_root)
+                            if glob_root
+                            else Path(fp).name
+                        )
+                        row: dict[str, Any] = {
+                            "file": rel,
+                            "path": fp,
+                            "ok": True,
+                            "shown": len(paths),
+                            "omitted": 0,
+                            "results": [],
+                        }
+                        try:
+                            sample = _load_sample(fp)
+                        except OSError as exc:
+                            row.update(
+                                ok=False,
+                                error=_bounded_text(f"cannot read {fp}: {exc}", 400),
+                            )
+                            matrix_results.append(row)
+                            continue
+                        for jp in paths:
+                            found, node = _select_json_path(sample, jp)
+                            if not found:
+                                row["results"].append(
+                                    {
+                                        "path": jp,
+                                        "ok": False,
+                                        "error": _bounded_text(node, 300),
+                                    }
+                                )
+                                continue
+                            tname = _json_type_name(node)
+                            per_path = type_summaries.setdefault(jp, {})
+                            per_path[tname] = per_path.get(tname, 0) + 1
+                            row["results"].append(
+                                {
+                                    "path": jp,
+                                    "ok": True,
+                                    "type": tname,
+                                    "value": _bounded_text(
+                                        node
+                                        if isinstance(node, str)
+                                        else _bounded_json_text(node, limit),
+                                        limit,
+                                    ),
+                                }
+                            )
+                        shown_paths = len(row["results"])
+                        row.update(shown=shown_paths, omitted=len(paths) - shown_paths)
+                        if row["omitted"]:
+                            row.update(truncated=True, truncation_reason="output_limit")
+                        matrix_results.append(row)
+                    payload = {
+                        "patterns": patterns,
+                        "file_count": len(files),
+                        "path_count": len(paths),
+                        "shown": sum(1 for row in matrix_results if row.get("shown")),
+                        "omitted": len(files)
+                        - sum(1 for row in matrix_results if row.get("shown")),
+                        "results": matrix_results,
+                    }
+                    if type_summaries:
+                        payload["type_summaries"] = {
+                            jp: dict(sorted(types.items()))
+                            for jp, types in type_summaries.items()
+                        }
+                    while (
+                        len(json.dumps(payload, ensure_ascii=False)) > BATCH_TOTAL_CHARS
+                    ):
+                        payload.update(truncated=True, truncation_reason="output_limit")
+                        victims = [r for r in payload["results"] if r.get("shown")]
+                        if not victims:
+                            payload["results"].pop()
+                            payload["shown"] = sum(
+                                1 for row in payload["results"] if row.get("shown")
+                            )
+                            payload["omitted"] = len(files) - payload["shown"]
+                            continue
+                        row = victims[-1]
+                        row["results"].pop()
+                        row["shown"] = len(row["results"])
+                        row["omitted"] = len(paths) - row["shown"]
+                        row.update(truncated=True, truncation_reason="output_limit")
+                    print(json.dumps(payload, ensure_ascii=False))
+                    return 0
                 for fp in files:
                     rel = os.path.relpath(fp, glob_root) if glob_root else Path(fp).name
                     row: dict[str, Any] = {"file": rel, "path": fp}

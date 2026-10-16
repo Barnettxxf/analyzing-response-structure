@@ -45,7 +45,8 @@ python scripts/inspect_sample.py read --files 'captures/*.html' -x '//h1/text()'
 
 # Wrap-up: bounded keyword-context search over raw captures (per file or batch).
 python scripts/inspect_sample.py read page.html --grep 'kw' --context 100
-python scripts/inspect_sample.py read --files 'captures/*.html' --grep 'kw' --show 5
+python scripts/inspect_sample.py read --files 'captures/*.html' --grep 'kw' --grep 'PCN'
+python scripts/inspect_sample.py read --files 'captures/*.html' --exclude 'detail-01.html' -p '$.code' -p '$.title'
 ```
 
 Quote paths literally in your shell. `--limit` caps characters **per value**
@@ -74,7 +75,7 @@ parsing; HTML-in-JSON uses a container path plus XPath.
 python -m unittest discover -s tests
 ```
 
-129 behavioral regression cases at this revision. XPath cases skip explicitly
+140 behavioral regression cases at this revision. XPath cases skip explicitly
 when `parsel` is absent; dependency guidance is exercised on an interpreter
 without it. Tests spawn the real CLI and assert values, exit codes, coverage
 metadata and output budgets. Synthetic fixtures stay small and portable;
@@ -83,10 +84,11 @@ truth merely because two model outputs agree.
 
 ## Version
 
-v1.14.0: stable script-ID paths, quoted special keys, safe attribute extraction,
-shared grouped XPath modes, keys-only maps, bounded HTML structure counts,
-configurable match display, and bounded keyword-context search (`--grep`).
-No site-specific selectors or framework aliases.
+v1.15.0: everything in v1.14 — stable script-ID paths, quoted special keys,
+safe attribute extraction, grouped XPath, keys-only maps, HTML structure
+counts, keyword-context search — plus multi-keyword grep, batch multi-path
+matrix with cross-file type summaries, and --exclude. No site-specific
+selectors or framework aliases.
 
 ## License
 

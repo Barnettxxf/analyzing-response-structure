@@ -490,10 +490,21 @@ class InspectSampleTests(unittest.TestCase):
             [r["values"][0] for r in payload["results"]], ["Alpha", "Beta"]
         )
 
-    def test_read_files_requires_exactly_one_path(self):
-        res = run("read", "--files", str(self.dir / "*.json"), "-p", "$.a", "-p", "$.b")
-        self.assertEqual(res.returncode, 1)
-        self.assertIn("exactly one", res.stdout)
+    def test_read_files_multiple_paths_matrix(self):
+        batch = self.dir / "matrixbatch"
+        batch.mkdir()
+        (batch / "a.json").write_text(
+            json.dumps({"code": 1, "label": "L"}), encoding="utf-8"
+        )
+        res = run(
+            "read", "--files", str(batch / "a.json"), "-p", "$.code", "-p", "$.label"
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["path_count"], 2)
+        row = payload["results"][0]
+        nested = {r["path"]: r["value"] for r in row["results"]}
+        self.assertEqual(nested, {"$.code": "1", "$.label": "L"})
 
     def test_read_files_no_match(self):
         res = run("read", "--files", str(self.dir / "nope-*.json"), "-p", "$.code")

@@ -685,6 +685,151 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(data["count"], 0)
         self.assertEqual(data["hits"], [])
 
+    # --- v1.15.0: --grep multi-keyword, batch multi-path matrix, --exclude ------
+
+    def test_read_grep_multi_keyword_merges_hits_in_document_order(self) -> None:
+        res = run(
+            "read", str(self.html), "--grep", "card", "--grep", "one", "--context", "4"
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        # case-insensitive: card ×4 (2 attrs + Card A/B), one ×1
+        self.assertEqual(data["count"], 5)
+        self.assertEqual(data["keywords"], {"card": 4, "one": 1})
+        offsets = [h["offset"] for h in data["hits"]]
+        self.assertEqual(offsets, sorted(offsets))  # document order
+        self.assertTrue(all(h["keyword"] in ("card", "one") for h in data["hits"]))
+
+    def test_read_grep_keywords_overlap_keeps_both_matches(self) -> None:
+        source = self.dir / "overlap.html"
+        source.write_text("<p>含 13% 增值税</p>", encoding="utf-8")
+        res = run("read", str(source), "--grep", "税", "--grep", "增值税")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        # 税 once (tail of 增值税); 增值税 once at its own start — merged, 2 hits
+        self.assertEqual(data["keywords"], {"税": 1, "增值税": 1})
+        self.assertEqual(data["count"], 2)
+
+    def test_read_grep_single_keyword_keeps_flat_contract(self) -> None:
+        res = run("read", str(self.html), "--grep", "card")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["count"], 4)
+        self.assertTrue(all(h["keyword"] == "card" for h in data["hits"]))
+
+    def test_read_files_multi_path_matrix_nested_by_file(self) -> None:
+        batch = self.dir / "matrix"
+        batch.mkdir()
+        for name, code in (("a.json", 1), ("b.json", 2)):
+            (batch / name).write_text(
+                json.dumps({"code": code, "label": name}), encoding="utf-8"
+            )
+        res = run(
+            "read", "--files", str(batch / "*.json"), "-p", "$.code", "-p", "$.label"
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["file_count"], 2)
+        self.assertEqual(data["path_count"], 2)
+        self.assertEqual(len(data["results"]), 2)
+        row = data["results"][0]
+        self.assertEqual(row["file"], "a.json")
+        nested = {r["path"]: r for r in row["results"]}
+        self.assertEqual(nested["$.code"]["value"], "1")
+        self.assertEqual(nested["$.label"]["value"], "a.json")
+        self.assertEqual(data["type_summaries"]["$.code"], {"integer": 2})
+        self.assertEqual(data["type_summaries"]["$.label"], {"string": 2})
+
+    def test_read_files_matrix_surfaces_cross_file_type_variance(self) -> None:
+        batch = self.dir / "variance"
+        batch.mkdir()
+        (batch / "int.json").write_text(json.dumps({"v": 7}), encoding="utf-8")
+        (batch / "str.json").write_text(json.dumps({"v": "7"}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "*.json"), "-p", "$.v")
+        data = json.loads(res.stdout)
+        self.assertEqual(
+            data["type_summary"], {"integer": 1, "string": 1}
+        )  # 单路径契约不变
+
+    def test_read_files_exclude_glob_filters_collected_files(self) -> None:
+        batch = self.dir / "excl"
+        batch.mkdir()
+        for name in ("keep1.json", "keep2.json", "skip.json"):
+            (batch / name).write_text(json.dumps({"code": 1}), encoding="utf-8")
+        res = run(
+            "read",
+            "--files",
+            str(batch / "*.json"),
+            "--exclude",
+            "skip.json",
+            "-p",
+            "$.code",
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["file_count"], 2)
+        self.assertFalse(any("skip" in r["file"] for r in data["results"]))
+
+    def test_read_files_accepts_literal_file_paths_without_glob(self) -> None:
+        batch = self.dir / "literal"
+        batch.mkdir()
+        (batch / "x.json").write_text(json.dumps({"code": 5}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "x.json"), "-p", "$.code")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(json.loads(res.stdout)["results"][0]["value"], "5")
+
+    def test_read_files_matrix_budget_trims_nested_results_honestly(self) -> None:
+        batch = self.dir / "fatm"
+        batch.mkdir()
+        (batch / "f.json").write_text(
+            json.dumps({f"v{i}": "x" * 20000 for i in range(6)}), encoding="utf-8"
+        )
+        res = run(
+            "read",
+            "--files",
+            str(batch / "f.json"),
+            "-p",
+            "$.v0",
+            "-p",
+            "$.v1",
+            "-p",
+            "$.v2",
+            "-p",
+            "$.v3",
+            "--limit",
+            "20000",
+        )
+        self.assertEqual(res.returncode, 0, res.stdout[:100] + res.stderr)
+        self.assertLessEqual(len(res.stdout.rstrip("\r\n")), 80000)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["path_count"], 4)
+        row = data["results"][0]
+        self.assertEqual(row["shown"] + row["omitted"], 4)
+        self.assertTrue(data["truncated"])
+
+    def test_read_files_zero_paths_still_rejected(self) -> None:
+        batch = self.dir / "zero"
+        batch.mkdir()
+        (batch / "c.json").write_text(json.dumps({"code": 1}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "c.json"))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("path", res.stdout)
+
+    def test_read_grep_still_rejects_multi_path_batch(self) -> None:
+        batch = self.dir / "grepm"
+        batch.mkdir()
+        (batch / "c.json").write_text(json.dumps({"code": 1}), encoding="utf-8")
+        res = run(
+            "read", "--files", str(batch / "c.json"), "--grep", "x", "-p", "$.code"
+        )
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("--grep", res.stdout)
+
+    def test_read_grep_empty_alternative_keyword_rejected(self) -> None:
+        res = run("read", str(self.html), "--grep", "card", "--grep", "  ")
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("non-empty", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
