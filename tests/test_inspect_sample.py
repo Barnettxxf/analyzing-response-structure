@@ -428,7 +428,8 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         self.assertEqual(payload["file_count"], 2)
-        self.assertEqual([r["value"] for r in payload["results"]], ["Alpha", "Beta"])
+        self.assertTrue(all(r["ok"] for r in payload["results"]))
+        self.assertEqual([r["values"][0] for r in payload["results"]], ["Alpha", "Beta"])
 
     def test_read_files_requires_exactly_one_path(self):
         res = run("read", "--files", str(self.dir / "*.json"), "-p", "$.a", "-p", "$.b")
@@ -560,6 +561,132 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("parse_error", res.stdout)
         self.assertIn("not json at all", res.stdout)
+
+    # --- P1-8: observational pagination candidates -------------------------------
+
+    def test_describe_pagination_candidates(self):
+        raw = json.dumps({
+            "pagination": {"page": 3, "page_size": 200, "total": 977, "has_more": True},
+            "next_token": "tk_999",
+            "message": "hi",
+            "items": [{"a": 1}],
+        })
+        f = self.dir / "pag.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        cands = payload.get("pagination_candidates")
+        self.assertTrue(cands)
+        cand_paths = {c["path"] for c in cands}
+        self.assertIn("$.pagination.page", cand_paths)
+        self.assertIn("$.pagination.total", cand_paths)
+        self.assertIn("$.pagination.has_more", cand_paths)
+        self.assertIn("$.next_token", cand_paths)
+        self.assertNotIn("$.message", cand_paths)  # 非分页键不误报
+        self.assertIn("observational candidates only", payload.get("pagination_note", ""))
+
+    def test_describe_pagination_candidates_capped(self):
+        big = {f"page_{i}": i for i in range(30)}
+        big["other"] = 1
+        f = self.dir / "pagcap.json"
+        f.write_text(json.dumps(big), encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        self.assertLessEqual(len(payload.get("pagination_candidates", [])), 20)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_glob_xpath_extraction_parity(self):
+        batch = self.dir / "batchx2"
+        batch.mkdir()
+        (batch / "p1.html").write_text(
+            '<html><body><a href="/a1">one</a><a href="/a2">two</a></body></html>', encoding="utf-8")
+        res_attr = run("read", "--files", str(batch / "p1.html"), "-x", "//a", "--attr", "href")
+        res_html = run("read", "--files", str(batch / "p1.html"), "-x", "//a", "--html")
+        attr_payload = json.loads(res_attr.stdout)
+        html_payload = json.loads(res_html.stdout)
+        self.assertEqual(attr_payload["results"][0]["values"], ["/a1", "/a2"])
+        self.assertIn("<a", html_payload["results"][0]["values"][0])
+
+    def test_read_files_limit_validation_and_clamp(self):
+        batch = self.dir / "batchlim"
+        batch.mkdir()
+        (batch / "c.json").write_text(json.dumps({"code": 7}), encoding="utf-8")
+        bad = run("read", "--files", str(batch / "c.json"), "-p", "$.code", "--limit", "0")
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("positive integer", bad.stdout)
+        big = run("read", "--files", str(batch / "c.json"), "-p", "$.code", "--limit", "999999")
+        self.assertEqual(big.returncode, 0)  # clamp 到 MAX，不报错
+
+    def test_read_files_identity_uses_relative_path(self):
+        d1 = self.dir / "d1"
+        d2 = self.dir / "d2"
+        d1.mkdir()
+        d2.mkdir()
+        (d1 / "x.json").write_text(json.dumps({"code": 1}), encoding="utf-8")
+        (d2 / "x.json").write_text(json.dumps({"code": 2}), encoding="utf-8")
+        res = run("read", "--files", str(d1 / "*.json"), "--files", str(d2 / "x.json"),
+                  "-p", "$.code")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["file_count"], 2)
+        self.assertEqual([r["value"] for r in payload["results"]], ["1", "2"])
+        self.assertEqual(len({r["path"] for r in payload["results"]}), 2)  # path 唯一可追溯
+
+    # --- v1.13.0: grouped -x + scalar XPath expressions --------------------------
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_xpath_scalar_count(self):
+        res = run("read", str(self.html_page), "-x", "count(//li)")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Traceback", res.stdout)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["value"], 3)
+        self.assertEqual(payload["type"], "number")
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_xpath_string_scalar(self):
+        res = run("read", str(self.html_page), "-x", "string(//a[1])")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("Traceback", res.stdout)
+        self.assertNotIn("XPath error", res.stdout)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_multi_x_grouped_envelope(self):
+        res = run("read", str(self.html_page), "-x", "//a", "-x", '//div[@class="card"]')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["count"], 2)
+        by_xp = {r["xpath"]: r for r in payload["results"]}
+        self.assertEqual(by_xp["//a"]["count"], 2)
+        self.assertEqual(by_xp["//a"]["values"], ["one", "two"])
+        self.assertEqual(by_xp['//div[@class="card"]']["count"], 2)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_multi_x_grouped_with_scalar_group(self):
+        res = run("read", str(self.html_page), "-x", "//a", "-x", "count(//li)")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        by_xp = {r["xpath"]: r for r in payload["results"]}
+        self.assertEqual(by_xp["//a"]["values"], ["one", "two"])
+        self.assertEqual(by_xp["count(//li)"]["value"], 3)
+        self.assertEqual(by_xp["count(//li)"]["type"], "number")
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_batch_scalar_xpath(self):
+        batch = self.dir / "batchs"
+        batch.mkdir()
+        (batch / "a.html").write_text("<html><body><li>x1</li><li>x2</li><li>x3</li></body></html>", encoding="utf-8")
+        (batch / "b.html").write_text("<html><body><li>y1</li></body></html>", encoding="utf-8")
+        res = run("read", "--files", str(batch / "*.html"), "-x", "count(//li)")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        by_file = {r["file"]: r for r in payload["results"]}
+        self.assertEqual(by_file["a.html"]["value"], 3)
+        self.assertEqual(by_file["b.html"]["value"], 1)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_batch_x_rejects_multiple_expressions(self):
+        res = run("read", "--files", str(self.html_page), "-x", "//a", "-x", "//b")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("single expression", res.stdout)
 
     # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 

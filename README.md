@@ -72,7 +72,7 @@ per-path batch semantics, and XPath over HTML.
 
 ## Status
 
-v1.12.0. Evolved v1.5.0 → v1.12.0 through a multi-model benchmark
+v1.13.0. Evolved v1.5.0 → v1.13.0 through a multi-model benchmark
 (strong/weak tiers, natural vs explicit skill triggering); every iteration
 was driven by an observed failure mode with a regression guard.
 
