@@ -15,7 +15,7 @@ description: >-
   without flooding context. Skip for small config files.
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
-  version: "1.11.0"
+  version: "1.12.0"
   origin: ported from an internal crawler project's parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
@@ -76,7 +76,7 @@ $.data.items[-1].shop_info.seller_name
 
 UTF-8 (BOM tolerated). File lines run first, then any `-p` flags. Total output caps at 80K chars — in `read` list mode ok-results beyond the first 30 come back `"omitted": true` with `value: null`; `describe` caps by size, subtrees past the budget return `"omitted": true` with `describe: null` (split the list across calls, don't raise limits).
 
-Batch mode: `read --files '<glob>' -p '$.code'` (or one `-x`) applies a single path across every matching file — compact per-file results `{file, ok, type|count, value|error}` in glob-sorted order, same 80K/omitted budget. Page-type detection across a mixed batch is one call away (e.g. `-x '//h1/text()'` or `describe --scripts` per pattern).
+Batch mode: `read --files '<glob>' -p '$.code'` (or one `-x`) applies a single path across every matching file — compact per-file results `{file, ok, type|count, value|error}` in glob-sorted order, same 80K/omitted budget. `--attr name` / `--text` / `--html` work identically in batch (per-file `values` lists, capped at 30 matches/file). Each result carries `file` (relative to the glob root) plus absolute `path`, so same-basename captures never lose identity; `-p` batch mode adds a cross-file `type_summary`. Page-type detection across a mixed batch is one call away (e.g. `-x '//h1/text()'` or `describe --scripts` per pattern).
 
 The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML string inside a JSON capture via one `-p` container (`read '<file>' -x '//b' -p '$.html'`). XPath is the only DOM selector offered (parsel/lxml: axes, `contains()`, `text()` nodes — a superset of CSS; **unions (`//a | //b`) are not supported — one expression per call**). Count-first: the envelope reports `count` plus `shown`/`omitted`, and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `-p`/`#script[n]` JSON modes never need it. Noise control: text-node queries should exclude scripts with `not(ancestor::script)` (e.g. `//td/text()[not(ancestor::script)]`), and on heavy SSR pages (giant `__NEXT_DATA__`-style state) enumerate script blocks first with `describe --scripts` instead of walking the whole map.
 
@@ -84,7 +84,7 @@ The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML 
 
 ## Output Contract
 
-Field-inventory table `path | type | variance | notes`, grouped: envelope / per-item fields / optional fields / embedded & derived data / pagination mechanics / cross-source mismatches. Variance column states the evidence basis (samples or full histogram). Downstream parser code is written from this table alone.
+Field-inventory table `path | type | variance | notes`, grouped: envelope / per-item fields / optional fields / embedded & derived data / pagination mechanics / cross-source mismatches. Variance column states the evidence basis (samples or full histogram). Downstream parser code is written from this table alone. Describe output may include `pagination_candidates` — observational matches on key names (`page`/`cursor`/`next`/`offset`/`has_more`/`total`/`token` patterns, capped at 20) with path/type/sample; semantics are NOT inferred, report them as candidates.
 
 Decode notation (this skill's own convention, not a standard syntax): for values inside JSON-encoded strings, write the raw path, then one ` -> ` per decode — `$.rc.ee[1].kb -> logistics.carrier` (decode once); `$.rc.ee[7].kb -> note -> inner_code` (decode twice). Arrow count = `json.loads` count.
 
