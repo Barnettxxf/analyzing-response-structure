@@ -16,7 +16,7 @@ description: >-
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
   version: "1.10.0"
-  origin: port of viber parse_dev describe_data/read_sample
+  origin: ported from an internal crawler project's parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
 
