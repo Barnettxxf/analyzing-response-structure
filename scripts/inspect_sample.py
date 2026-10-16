@@ -240,8 +240,13 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
     for kind, value in tokens:
         if kind == "key":
             if not isinstance(node, dict):
+                hint = (
+                    "; this file is HTML — embedded JSON lives in $#script[n] (describe lists them)"
+                    if isinstance(node, str) and _looks_like_html(node)
+                    else ""
+                )
                 return False, _path_error(
-                    f"{prefix} is {type(node).__name__}, cannot read object key {value!r}"
+                    f"{prefix} is {type(node).__name__}, cannot read object key {value!r}{hint}"
                 )
             if value not in node:
                 keys = ", ".join(str(key)[:64] for key in list(node.keys())[:20]) or "(no keys)"
@@ -691,6 +696,8 @@ def main(argv: list[str] | None = None) -> int:
                             help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)")
     p_describe.add_argument("--paths-file", default=None,
                             help="text file with one json_path per line (# comments and blank lines allowed)")
+    p_describe.add_argument("--scripts", action="store_true",
+                            help="HTML only: enumerate embedded JSON #script[n] blocks (id/type/size) without walking them")
     p_read = sub.add_parser(
         "read", aliases=["batch", "batch_read"],
         help="bounded slice of one subtree, per-path values for a path list, or XPath matches over HTML")
@@ -716,6 +723,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command in ("describe", "batch_describe"):
             legacy_batch = args.command == "batch_describe"
+            if getattr(args, "scripts", False):
+                sample = _load_sample(path)
+                if not (isinstance(sample, str) and _looks_like_html(sample)):
+                    print(json.dumps({
+                        "error": "this file did not parse as HTML — --scripts enumerates embedded JSON <script> blocks in HTML captures"
+                    }, ensure_ascii=False))
+                    return 1
+                scripts = _embedded_json_scripts(sample)
+                listing = [
+                    {
+                        "index": index,
+                        "script_id": s["id"],
+                        "script_type": s["type"],
+                        "json_bytes": len(json.dumps(s["value"], ensure_ascii=False)),
+                    }
+                    for index, s in enumerate(scripts)
+                ]
+                print(json.dumps({"file": str(path), "count": len(listing), "scripts": listing}, ensure_ascii=False))
+                return 0
             if args.xpath:
                 if legacy_batch:
                     print("[inspect_sample] the -x channel is a plain `describe` feature — batch aliases do not carry it")

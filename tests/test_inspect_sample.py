@@ -373,6 +373,28 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(json.loads(res.stdout), {"a": 1})  # one path = plain slice, no envelope
 
+    def test_read_html_miss_hints_script_selector(self):
+        res = run("read", str(self.html_page), "-p", "$.nothing")
+        self.assertIn("cannot read object key", res.stdout)
+        self.assertIn("$#script[n]", res.stdout)
+        self.assertIn("describe", res.stdout)
+
+    def test_describe_scripts_enumeration(self):
+        res = run("describe", str(self.html_file), "--scripts")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["count"], 2)
+        s0, s1 = payload["scripts"]
+        self.assertEqual((s0["index"], s0["script_id"]), (0, "__NEXT_DATA__"))
+        self.assertEqual(s1["script_type"], "application/ld+json")
+        self.assertGreater(s0["json_bytes"], 0)
+
+    def test_describe_scripts_on_json_file_is_guidance(self):
+        res = run("describe", str(self.json_file), "--scripts")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("did not parse as HTML", res.stdout)
+        self.assertNotIn("Traceback", res.stdout)
+
     # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
