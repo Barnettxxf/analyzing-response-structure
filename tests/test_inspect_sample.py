@@ -395,6 +395,55 @@ class InspectSampleTests(unittest.TestCase):
         self.assertIn("did not parse as HTML", res.stdout)
         self.assertNotIn("Traceback", res.stdout)
 
+    # --- multi-file batch (--files glob; one path across every file) ------------
+
+    def test_read_files_glob_json_path(self):
+        batch = self.dir / "batch"
+        batch.mkdir()
+        for i, n in enumerate([10, 20, 30], start=1):
+            (batch / f"c{i}.json").write_text(json.dumps({"code": n}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "*.json"), "-p", "$.code")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["file_count"], 3)
+        self.assertEqual([r["value"] for r in payload["results"]], ["10", "20", "30"])
+        self.assertTrue(all(r["ok"] for r in payload["results"]))
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_glob_xpath(self):
+        batch = self.dir / "batchx"
+        batch.mkdir()
+        (batch / "p1.html").write_text("<html><body><h1>Alpha</h1></body></html>", encoding="utf-8")
+        (batch / "p2.html").write_text("<html><body><h1>Beta</h1></body></html>", encoding="utf-8")
+        res = run("read", "--files", str(batch / "*.html"), "-x", "//h1/text()", "--text")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertEqual(payload["file_count"], 2)
+        self.assertEqual([r["value"] for r in payload["results"]], ["Alpha", "Beta"])
+
+    def test_read_files_requires_exactly_one_path(self):
+        res = run("read", "--files", str(self.dir / "*.json"), "-p", "$.a", "-p", "$.b")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("exactly one", res.stdout)
+
+    def test_read_files_no_match(self):
+        res = run("read", "--files", str(self.dir / "nope-*.json"), "-p", "$.code")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("no files match", res.stdout)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_per_file_error_is_row_level(self):
+        batch = self.dir / "mixed"
+        batch.mkdir()
+        (batch / "good.html").write_text("<html><body><h1>Hi</h1></body></html>", encoding="utf-8")
+        (batch / "data.json").write_text(json.dumps({"not": "html"}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "*"), "-x", "//h1/text()")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        rows = {r["file"]: r for r in payload["results"]}
+        self.assertTrue(rows["good.html"]["ok"])
+        self.assertFalse(rows["data.json"]["ok"])
+
     # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")

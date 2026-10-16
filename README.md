@@ -42,6 +42,9 @@ python scripts/inspect_sample.py read page.html -p '$#script[0].props'
 # XPath over HTML (server-rendered pages; needs optional `parsel` —
 # the command prints its exact install command when missing)
 python scripts/inspect_sample.py read page.html -x '//table[@class="product"]//tr' --attr href
+
+# batch: one path across a whole glob of captures (page-type detection, variance loops)
+python scripts/inspect_sample.py read --files 'captures\detail-*.html' -x '//h1/text()'
 ```
 
 Single quotes protect `$`, `[`, and `"` in pwsh/bash. List mode caps per-value
@@ -61,7 +64,7 @@ then one ` -> ` per `json.loads` — `$.rc.ee[1].kb -> logistics.carrier`
 python tests/test_inspect_sample.py
 ```
 
-48 cases, any interpreter (Python 3.9+; `-x` cases auto-skip when the
+53 cases, any interpreter (Python 3.9+; `-x` cases auto-skip when the
 optional `parsel` package is absent): every case spawns the script as a
 subprocess and asserts the agent-facing contract — bounded outputs,
 guidance-not-traceback errors, exit codes, embedded-JSON extraction,
@@ -69,7 +72,7 @@ per-path batch semantics, and XPath over HTML.
 
 ## Status
 
-v1.9.1. Evolved v1.5.0 → v1.9.1 through a multi-model benchmark
+v1.10.0. Evolved v1.5.0 → v1.10.0 through a multi-model benchmark
 (strong/weak tiers, natural vs explicit skill triggering); every iteration
 was driven by an observed failure mode with a regression guard.
 

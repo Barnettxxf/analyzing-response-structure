@@ -29,6 +29,7 @@ Intentional deltas vs the parsel-based original (documented; do NOT "fix"):
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import re
 import sys
@@ -701,13 +702,16 @@ def main(argv: list[str] | None = None) -> int:
     p_read = sub.add_parser(
         "read", aliases=["batch", "batch_read"],
         help="bounded slice of one subtree, per-path values for a path list, or XPath matches over HTML")
-    p_read.add_argument("file", help="response file (JSON or HTML)")
+    p_read.add_argument("file", nargs="?", default=None,
+                        help="response file (JSON or HTML); omit only in --files batch mode")
     p_read.add_argument("-p", "--json-path", action="append", nargs="*", default=[],
                         help="one or more json_paths per occurrence; repeatable")
     p_read.add_argument("-x", "--xpath", default="",
                         help="XPath over HTML instead of $ paths (optional parsel; pair with one -p container for JSON captures)")
     p_read.add_argument("--paths-file", default=None,
                         help="text file with one json_path per line (# comments and blank lines allowed)")
+    p_read.add_argument("--files", action="append", nargs="*", default=[],
+                        help="one or more glob patterns per occurrence; repeatable — every matching file is processed")
     x_group = p_read.add_mutually_exclusive_group()
     x_group.add_argument("--attr", default=None, help="with -x: extract this attribute from every match")
     x_group.add_argument("--text", action="store_true", help="with -x: extract each match's text content")
@@ -716,8 +720,11 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"max characters per result (single mode default {DEFAULT_READ_LIMIT}; list mode default {BATCH_VALUE_LIMIT}; 1..{MAX_READ_SAMPLE_CHARS})")
     args = parser.parse_args(argv)
 
-    path = Path(args.file)
-    if not path.is_file():
+    if not args.file and not getattr(args, "files", None):
+        print("[inspect_sample] file is required (or use --files for batch mode)")
+        return 1
+    path = Path(args.file) if args.file else None
+    if path is not None and not path.is_file():
         print(f"[inspect_sample] file not found: {args.file}")
         return 1
     try:
@@ -784,6 +791,83 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(batch_describe_data(path, paths), ensure_ascii=False))
             return 0
         if args.command in ("read", "batch", "batch_read"):
+            legacy_batch = args.command != "read"
+            if getattr(args, "files", None):
+                if legacy_batch:
+                    print("[inspect_sample] batch mode (--files) is a plain `read` feature — batch aliases do not carry it")
+                    return 1
+                paths = _gather_paths(args)
+                if args.xpath and paths:
+                    print("[inspect_sample] batch -x takes no -p container — one -x per call")
+                    return 1
+                if not args.xpath and len(paths) != 1:
+                    print("[inspect_sample] batch mode needs exactly one -p path (or one -x XPath)")
+                    return 1
+                patterns = [pat for occ in (args.files or []) for pat in occ]
+                if not patterns:
+                    print("[inspect_sample] batch mode needs at least one --files glob pattern")
+                    return 1
+                files = sorted({f for pat in patterns for f in glob.glob(pat)})
+                if not files:
+                    print(f"[inspect_sample] no files match: {', '.join(patterns)}")
+                    return 1
+                limit = BATCH_VALUE_LIMIT
+                if args.limit is not None:
+                    try:
+                        limit = int(str(args.limit).strip())
+                    except ValueError:
+                        print("[read_sample] limit must be a positive integer")
+                        return 1
+                results = []
+                shown = 0
+                budget_spent = 0
+                for fp in files:
+                    name = Path(fp).name
+                    if args.xpath:
+                        sample = _load_sample(fp)
+                        m, err = _xpath_matches(sample, args.xpath, "")
+                        if m is None and err is None:
+                            results.append({"file": name, "ok": False, "error": "parsel missing"})
+                            continue
+                        if err is not None:
+                            results.append({"file": name, "ok": False, "error": _bounded_text(err.get("error", ""), 300)})
+                            continue
+                        first = m[0] if m else None
+                        if first is None:
+                            value = ""
+                        elif isinstance(first.root, str) or not hasattr(first.root, "tag"):
+                            value = " ".join(str(first.root).split())
+                        else:
+                            value = " ".join(" ".join(first.css("::text").getall()).split())
+                        results.append({"file": name, "ok": True, "count": len(m),
+                                        "value": _bounded_text(value, limit)})
+                    else:
+                        sample = _load_sample(fp)
+                        found, node = _select_json_path(sample, paths[0])
+                        if not found:
+                            results.append({"file": name, "ok": False,
+                                            "error": _bounded_text(node, 300)})
+                        else:
+                            results.append({"file": name, "ok": True,
+                                            "type": _json_type_name(node),
+                                            "value": _bounded_text(
+                                                node if isinstance(node, str)
+                                                else _bounded_json_text(node, limit), limit)})
+                    entry_len = len(json.dumps(results[-1], ensure_ascii=False))
+                    if budget_spent + entry_len > BATCH_TOTAL_CHARS:
+                        results.pop()
+                        break
+                    budget_spent += entry_len
+                    shown += 1
+                payload = {
+                    "patterns": patterns,
+                    "file_count": len(files),
+                    "shown": shown,
+                    "omitted": len(files) - shown,
+                    "results": results,
+                }
+                print(json.dumps(payload, ensure_ascii=False))
+                return 0
             legacy_batch = args.command != "read"
             if args.attr is not None or args.text or args.html:
                 if not args.xpath:
