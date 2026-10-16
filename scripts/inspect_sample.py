@@ -44,6 +44,7 @@ MAX_DIGEST_ENTRIES = 200
 MAX_DIGEST_WIDTH = 50
 MAX_DIGEST_DEPTH = 16
 MAX_LEAF_SAMPLE = 80
+MAX_UNION_KEYS = 40
 MAX_DIGEST_OUTPUT_CHARS = 24_000
 MAX_READ_SAMPLE_CHARS = 20_000
 DIGEST_ENTRY_BUDGET = 11_000
@@ -93,27 +94,34 @@ class _ScriptCollector(HTMLParser):
         self._meta: tuple[str | None, str | None] = (None, None)
 
     def _wants(self, attrs: list[tuple[str, str | None]]) -> bool:
-        attrd = {str(k).lower(): str(v or "") for k, v in attrs}
-        sid = attrd.get("id")
-        stype = attrd.get("type", "").split(";", 1)[0].strip().lower()
-        if sid == "__NEXT_DATA__" or stype == "application/json" or stype.endswith("+json"):
-            self._meta = (sid, stype or None)
-            return True
-        return False
+        return True  # v1.11: every inline <script> is a candidate (parse status recorded)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "script" and not self._capturing and self._wants(attrs):
+        if tag == "script" and not self._capturing:
+            attrd = {str(k).lower(): str(v or "") for k, v in attrs}
+            self._meta = (attrd.get("id") or None, attrd.get("type") or None)
             self._capturing = True
             self._chunks = []
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "script" and self._capturing:
             self._capturing = False
+            text = "".join(self._chunks)
+            if not text.strip():
+                return  # src-only / empty include: no inline content to inspect
+            entry: dict[str, Any] = {
+                "id": self._meta[0],
+                "type": self._meta[1],
+                "length": len(text),
+            }
             try:
-                value = json.loads("".join(self._chunks))
+                entry["value"] = json.loads(text)
+                entry["ok"] = True
             except (TypeError, ValueError):
-                return  # malformed embedded JSON: skip with a note, by design
-            self.scripts.append({"id": self._meta[0], "type": self._meta[1], "value": value})
+                entry["ok"] = False
+                entry["parse_error"] = True
+                entry["head"] = text.strip()[:160]
+            self.scripts.append(entry)
 
     def handle_data(self, data: str) -> None:
         if self._capturing:
@@ -137,6 +145,7 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
     if len(json_path) > 2048:
         return "path too long; use a bounded path from describe"
     digit_index = re.compile(r"[0-9]{1,18}\Z")
+    neg_index = re.compile(r"-[0-9]{1,18}\Z")
     tokens: list[tuple[str, Any]] = []
     index = 1
     while index < len(json_path):
@@ -181,6 +190,8 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
                 return "unclosed [] path segment"
             raw = json_path[index + 1 : end]
             if digit_index.fullmatch(raw):
+                tokens.append(("index", int(raw)))
+            elif neg_index.fullmatch(raw):
                 tokens.append(("index", int(raw)))
             else:
                 try:
@@ -257,11 +268,12 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
         elif kind == "index":
             if not isinstance(node, list):
                 return False, _path_error(f"{prefix} is not a list; cannot index [{value}]")
-            if value >= len(node):
+            idx = value if value >= 0 else len(node) + value
+            if idx >= len(node) or idx < 0:
                 return False, _path_error(
                     f"{prefix}[{value}] out of range; list length={len(node)}"
                 )
-            node = node[value]
+            node = node[idx]
             prefix += f"[{value}]"
         elif kind == "script":
             if not isinstance(node, str) or not _looks_like_html(node):
@@ -278,7 +290,12 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                 return False, _path_error(
                     f"{prefix} has no script[{value}]; available: {available}"
                 )
-            node = scripts[value]["value"]
+            cand = scripts[value]
+            if not cand.get("ok"):
+                return False, _path_error(
+                    f"{prefix} parse_error: script content is not JSON — head: {cand.get('head', '')[:120]}"
+                )
+            node = cand["value"]
             prefix += f"{SCRIPT_MARKER}{value}]"
     return True, node
 
@@ -310,6 +327,41 @@ def _digest_entry(path: str, value: Any) -> dict[str, Any]:
     if isinstance(value, (int, float)):
         return {"path": path, "type": type(value).__name__, "sample": str(value)}
     return {"path": path, "type": type(value).__name__}
+
+
+def _array_enrichment(value: list) -> dict[str, Any]:
+    """Bounded heterogeneity digest for arrays: element types, union keys with
+    occurrence counts and JSON-type distributions (null counted), and the
+    first/middle/last sampled indices. Key-level scan covers ALL elements;
+    values are still only sampled via the [0] child — read -p for the rest."""
+    n = len(value)
+    enrichment: dict[str, Any] = {}
+    type_counter: dict[str, int] = {}
+    for el in value:
+        name = type(el).__name__
+        type_counter[name] = type_counter.get(name, 0) + 1
+    enrichment["element_types"] = dict(sorted(type_counter.items(), key=lambda kv: (-kv[1], kv[0])))
+    if any(isinstance(el, dict) for el in value):
+        union: dict[str, dict[str, int]] = {}
+        for el in value:
+            if not isinstance(el, dict):
+                continue
+            for k, v in el.items():
+                slot = union.setdefault(k, {"count": 0, "types": {}})
+                slot["count"] += 1
+                tname = _json_type_name(v)
+                slot["types"][tname] = slot["types"].get(tname, 0) + 1
+        ordered = sorted(union.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
+        shown = ordered[:MAX_UNION_KEYS]
+        enrichment["union_keys"] = {
+            k: {"count": c["count"], "types": sorted(c["types"])} for k, c in shown
+        }
+        if len(ordered) > MAX_UNION_KEYS:
+            enrichment["union_keys_truncated"] = True
+            enrichment["union_keys_omitted"] = len(ordered) - MAX_UNION_KEYS
+    mid = n // 2
+    enrichment["sampled_indices"] = sorted({0, mid, n - 1})
+    return enrichment
 
 
 def _append_digest_entry(
@@ -385,6 +437,7 @@ def _walk_digest(
             children.append((f"{path}[0]", value[0]))
             if len(value) > 1:
                 entry["sample_count"] = 1
+            entry.update(_array_enrichment(value))
     elif isinstance(value, str) and _looks_like_html(value):
         if depth >= MAX_DIGEST_DEPTH:
             scripts = _embedded_json_scripts(value)
@@ -394,7 +447,11 @@ def _walk_digest(
             for index, script in enumerate(_embedded_json_scripts(value)):
                 script_path = f"{path}{SCRIPT_MARKER}{index}]"
                 annotation = {"script_id": script["id"], "script_type": script["type"]}
-                children.append((script_path, script["value"]))
+                if script.get("ok"):
+                    children.append((script_path, script["value"]))
+                else:
+                    annotation["parse_error"] = True
+                    children.append((script_path, script.get("head", "")))
                 state.setdefault("annotations", {})[script_path] = annotation
 
     if not _append_digest_entry(entry, entries, state):
@@ -738,15 +795,20 @@ def main(argv: list[str] | None = None) -> int:
                     }, ensure_ascii=False))
                     return 1
                 scripts = _embedded_json_scripts(sample)
-                listing = [
-                    {
+                listing = []
+                for index, s in enumerate(scripts):
+                    row: dict[str, Any] = {
                         "index": index,
                         "script_id": s["id"],
                         "script_type": s["type"],
-                        "json_bytes": len(json.dumps(s["value"], ensure_ascii=False)),
+                        "length": s["length"],
+                        "parse_error": bool(s.get("parse_error")),
                     }
-                    for index, s in enumerate(scripts)
-                ]
+                    if s.get("ok"):
+                        row["json_bytes"] = len(json.dumps(s["value"], ensure_ascii=False))
+                    else:
+                        row["head"] = s.get("head", "")
+                    listing.append(row)
                 print(json.dumps({"file": str(path), "count": len(listing), "scripts": listing}, ensure_ascii=False))
                 return 0
             if args.xpath:

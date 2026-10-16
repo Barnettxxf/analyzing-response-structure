@@ -109,20 +109,25 @@ class InspectSampleTests(unittest.TestCase):
         self.assertIn("$.data.items[0]", paths)
         self.assertFalse(payload["truncated"])
 
-    def test_describe_html_extracts_only_real_json_scripts(self):
+    def test_describe_html_scripts_candidates_with_status(self):
         res = run("describe", str(self.html_file))
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
-        script_roots = {
+        roots = {
             e["path"]: e
             for e in payload["entries"]
             if re.fullmatch(r"\$#script\[\d+\]", e["path"])
         }
-        self.assertEqual(set(script_roots), {"$#script[0]", "$#script[1]"})
-        self.assertEqual(script_roots["$#script[0]"]["script_id"], "__NEXT_DATA__")
-        self.assertEqual(script_roots["$#script[1]"]["script_type"], "application/ld+json")
-        # commented-out script, JS assignment (window.__CFG__), and malformed
-        # JSON script must all be excluded — exactly 2 collected.
+        # v1.11 collect-all semantics: every inline <script> is a candidate in
+        # document order; commented-out script still excluded (comment events).
+        self.assertEqual(
+            sorted(roots),
+            ["$#script[0]", "$#script[1]", "$#script[2]", "$#script[3]"],
+        )
+        self.assertEqual(roots["$#script[0]"]["script_id"], "__NEXT_DATA__")
+        self.assertEqual(roots["$#script[1]"]["script_type"], "application/ld+json")
+        self.assertTrue(roots["$#script[2]"]["parse_error"])  # window.__CFG__ = JS 赋值
+        self.assertTrue(roots["$#script[3]"]["parse_error"])  # "not json at all"
 
     def test_describe_json_path_subtree(self):
         res = run("describe", str(self.json_file), "--json-path", "$.data.pagination")
@@ -383,11 +388,15 @@ class InspectSampleTests(unittest.TestCase):
         res = run("describe", str(self.html_file), "--scripts")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
-        self.assertEqual(payload["count"], 2)
-        s0, s1 = payload["scripts"]
-        self.assertEqual((s0["index"], s0["script_id"]), (0, "__NEXT_DATA__"))
-        self.assertEqual(s1["script_type"], "application/ld+json")
-        self.assertGreater(s0["json_bytes"], 0)
+        self.assertEqual(payload["count"], 4)  # all inline candidates, incl. broken
+        s = payload["scripts"]
+        self.assertEqual((s[0]["index"], s[0]["script_id"]), (0, "__NEXT_DATA__"))
+        self.assertFalse(s[0]["parse_error"])
+        self.assertEqual(s[1]["script_type"], "application/ld+json")
+        self.assertTrue(s[2]["parse_error"])
+        self.assertIn("window.__CFG__", s[2]["head"])
+        self.assertTrue(s[3]["parse_error"])
+        self.assertGreater(s[0]["json_bytes"], 0)
 
     def test_describe_scripts_on_json_file_is_guidance(self):
         res = run("describe", str(self.json_file), "--scripts")
@@ -443,6 +452,102 @@ class InspectSampleTests(unittest.TestCase):
         rows = {r["file"]: r for r in payload["results"]}
         self.assertTrue(rows["good.html"]["ok"])
         self.assertFalse(rows["data.json"]["ok"])
+
+    # --- P0-1: array union-key / type-distribution enrichment -------------------
+
+    def test_describe_list_union_keys_and_type_distribution(self):
+        raw = json.dumps({"floors": [
+            {"type": "banner", "img": "x.png"},
+            {"type": "goods", "items": [{"sku": "s1"}]},
+            {"type": "coupon", "amount": 5, "memo": None},
+        ]})
+        f = self.dir / "floors.json"
+        f.write_text(raw, encoding="utf-8")
+        res = run("describe", str(f))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        entry = next(e for e in payload["entries"] if e["path"] == "$.floors")
+        self.assertEqual(entry["cardinality"], 3)
+        uk = entry["union_keys"]
+        self.assertEqual(uk["type"]["count"], 3)
+        self.assertEqual(uk["type"]["types"], ["string"])
+        self.assertEqual(uk["img"]["count"], 1)
+        self.assertEqual(uk["memo"]["types"], ["null"])  # null 是一种被统计的类型
+        self.assertEqual(uk["items"]["count"], 1)
+        self.assertEqual(entry["sampled_indices"], [0, 1, 2])
+
+    def test_describe_list_type_flip_visible(self):
+        raw = json.dumps({"vals": [{"a": 1}, {"a": "one"}, {"a": None}]})
+        f = self.dir / "flip.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        uk = next(e for e in payload["entries"] if e["path"] == "$.vals")["union_keys"]
+        self.assertEqual(sorted(uk["a"]["types"]), ["integer", "null", "string"])
+
+    def test_describe_list_sampled_indices_first_mid_last(self):
+        raw = json.dumps({"rows": [{"i": i} for i in range(200)]})
+        f = self.dir / "rows.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        entry = next(e for e in payload["entries"] if e["path"] == "$.rows")
+        self.assertEqual(entry["sampled_indices"], [0, 100, 199])
+
+    def test_describe_list_union_keys_capped(self):
+        big = {"k%02d" % i: i for i in range(60)}
+        raw = json.dumps({"rows": [big, big]})
+        f = self.dir / "big.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        entry = next(e for e in payload["entries"] if e["path"] == "$.rows")
+        self.assertLessEqual(len(entry["union_keys"]), 40)
+        self.assertTrue(entry.get("union_keys_truncated"))
+
+    def test_describe_list_element_types_non_dict(self):
+        raw = json.dumps({"mixed": ["a", 1, None, True, 2.5]})
+        f = self.dir / "mixed.json"
+        f.write_text(raw, encoding="utf-8")
+        payload = json.loads(run("describe", str(f)).stdout)
+        entry = next(e for e in payload["entries"] if e["path"] == "$.mixed")
+        self.assertEqual(entry["element_types"], {"str": 1, "int": 1, "NoneType": 1, "bool": 1, "float": 1})
+
+    # --- P0-3: negative index support --------------------------------------------
+
+    def test_read_negative_index_supported(self):
+        res = run("read", str(self.json_file), "-p", "$.data.items[-1].id")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), 3)
+
+    def test_read_negative_index_out_of_range_guidance(self):
+        res = run("read", str(self.json_file), "-p", "$.data.items[-300].id")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("out of range", res.stdout)
+        self.assertIn("length=3", res.stdout)
+
+    def test_describe_negative_index_path_works(self):
+        res = run("describe", str(self.json_file), "-p", "$.data.items[-1]")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        self.assertTrue(any(e["path"].endswith("items[-1].id") for e in payload["entries"]))
+
+    # --- P0-2: malformed embedded JSON is reported, not silently dropped --------
+
+    def test_describe_scripts_lists_malformed_with_parse_error(self):
+        res = run("describe", str(self.html_file), "--scripts")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        payload = json.loads(res.stdout)
+        by_index = {s["index"]: s for s in payload["scripts"]}
+        self.assertEqual(payload["count"], 4)  # NEXT_DATA, ld+json, window.__CFG__, malformed
+        self.assertFalse(by_index[0].get("parse_error"))
+        self.assertFalse(by_index[1].get("parse_error"))
+        self.assertTrue(by_index[2].get("parse_error"))  # window.__CFG__ = ... 不是 JSON 文本
+        self.assertTrue(by_index[3].get("parse_error"))  # "not json at all"
+        self.assertIn("not json at all", by_index[3]["head"])
+
+    def test_read_malformed_script_gives_parse_error(self):
+        res = run("read", str(self.html_file), "-p", "$#script[3]")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("parse_error", res.stdout)
+        self.assertIn("not json at all", res.stdout)
 
     # --- -x channel (XPath over HTML via read/describe; optional parsel) -------
 
