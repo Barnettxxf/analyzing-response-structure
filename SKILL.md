@@ -15,7 +15,7 @@ description: >-
   without flooding context. Skip for small config files.
 compatibility: Any Python 3.9+ on PATH. Offline, read-only, stdlib only.
 metadata:
-  version: "1.9.1"
+  version: "1.9.2"
   origin: port of viber parse_dev describe_data/read_sample
   interpreter: python, python3, py -3, or user-specified
 ---
@@ -75,7 +75,7 @@ $.data.items[-1].shop_info.seller_name
 
 UTF-8 (BOM tolerated). File lines run first, then any `-p` flags. Total output caps at 80K chars — in `read` list mode ok-results beyond the first 30 come back `"omitted": true` with `value: null`; `describe` caps by size, subtrees past the budget return `"omitted": true` with `describe: null` (split the list across calls, don't raise limits).
 
-The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML string inside a JSON capture via one `-p` container (`read '<file>' -x '//b' -p '$.html'`). XPath is the only DOM selector offered (parsel/lxml: axes, `contains()`, `text()` nodes — a superset of CSS; **unions (`//a | //b`) are not supported — one expression per call**). Count-first: the envelope reports `count` plus `shown`/`omitted`, and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `-p`/`#script[n]` JSON modes never need it. Noise control: text-node queries should exclude scripts with `not(ancestor::script)` (e.g. `//text()[contains(., "tax") and not(ancestor::script)]`), and on heavy SSR pages (giant `__NEXT_DATA__`-style state) enumerate script blocks first with `describe --scripts` instead of walking the whole map.
+The `-x` channel runs **XPath** over HTML — server-rendered pages, or an HTML string inside a JSON capture via one `-p` container (`read '<file>' -x '//b' -p '$.html'`). XPath is the only DOM selector offered (parsel/lxml: axes, `contains()`, `text()` nodes — a superset of CSS; **unions (`//a | //b`) are not supported — one expression per call**). Count-first: the envelope reports `count` plus `shown`/`omitted`, and shows the first 30 matches (default blocks carry `tag`/`attrs`/`text`; `--attr name` / `--text` / `--html` switch extraction to value lists; per-value 600 chars, `--limit` overrides). Needs the optional `parsel` package — when missing, the command prints the exact install command for the running interpreter; the `-p`/`#script[n]` JSON modes never need it. Noise control: text-node queries should exclude scripts with `not(ancestor::script)` (e.g. `//td/text()[not(ancestor::script)]`), and on heavy SSR pages (giant `__NEXT_DATA__`-style state) enumerate script blocks first with `describe --scripts` instead of walking the whole map.
 
 `<skill_dir>` = this skill's base directory; absolute fallback `~/.agents/skills/analyzing-response-structure/scripts/inspect_sample.py`. Misses return available keys / the list length; `...[truncated]` means go deeper, not bigger limits.
 
@@ -91,4 +91,5 @@ Decode notation (this skill's own convention, not a standard syntax): for values
 - Inventory from item[0]/few slices without the histogram — traps live in later items.
 - Trusting display formats: `"1,299.00"` is a string; `0/1` may not be a bool; JSON-encoded string fields need a second parse.
 - One pagination mechanism reported when a cursor and numeric paging coexist.
+- Multi-file batches: comparing only the first file before generalizing — a batch can mix page kinds (listing vs detail, SSR vs API); check one representative file per distinct page type.
 - The urge to read the whole file — that's `describe`'s job.
