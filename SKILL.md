@@ -44,7 +44,7 @@ Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-spe
 1. **Map**: `describe` the file; scan `entries`; note `truncated` / `truncation_reason`.
 2. **Descend**: truncated, or need one region? `describe --json-path '<subtree>'`.
 3. **Slice**: `read --json-path` the first, a middle, and the LAST element (default 2000 chars covers most object slices); diff key sets and types — item[0]-only inventories are guesses. Many fields at once? `read -p '$.a' -p '$.b'` returns path+type+value for a whole list; many subtrees to map? `describe -p ...` does it in one call.
-4. **Prove variance** (arrays ≥100): describe now reports `union_keys` (occurrence counts + JSON-type distributions incl. null — heterogeneous arrays like BFF floor lists show every variant), `element_types`, `sampled_indices` and `unsampled_count` — cite these as baseline evidence. For cross-field math (sums, min/max, price×100 comparisons) still run a tiny stdlib script; never write "verified across all items" without either the built-in union or your own scan.
+4. **Prove variance** (arrays ≥100): describe now reports `union_keys` (occurrence counts + JSON-type distributions incl. null — heterogeneous arrays like page-section lists where every section has a different schema show every variant), `element_types`, `sampled_indices` and `unsampled_count` — cite these as baseline evidence. For cross-field math (sums, min/max, unit conversions) still run a tiny stdlib script; never write "verified across all items" without either the built-in union or your own scan.
 5. **Hunt embedded JSON**: every inline `<script>` is a candidate in the map as `#script[0]`, `#script[1]`, … annotated with id/type/parse status — a `parse_error` candidate (JS assignment, malformed JSON) is a finding, not absence; its raw head is readable at that path. JS-variable assignments still need manual decode of the raw head.
 6. **Inventory**: report per the contract; every stated path/type comes from an observed slice or the histogram — mark anything else UNVERIFIED, never guess.
 
@@ -56,7 +56,7 @@ Single-quote the file path and the whole `--json-path` value (literal in pwsh/ba
 python <skill_dir>/scripts/inspect_sample.py describe '<file>'
 python <skill_dir>/scripts/inspect_sample.py describe '<file>' -p '$.data.items' -p '$.data.page_info'
 python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.data.items[0]'
-python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.code' -p '$.data.items[0].title' -p '$.data.items[-1].shop_info.seller_name'
+python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.code' -p '$.data.items[0].title' -p '$.data.items[-1].shop.name'
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --json-path '$#script[0].props' --limit 2000
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --paths-file paths.txt
 python <skill_dir>/scripts/inspect_sample.py read '<file>' -x '//tr[@class="product"]' --attr href
@@ -64,7 +64,7 @@ python <skill_dir>/scripts/inspect_sample.py describe '<html>' --scripts
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' -x '//h1/text()'
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --grep 'kw1' --grep 'kw2' --context 100
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' -p '$.code' -p '$.data.total'
-python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' --exclude 'detail-01.html' -p '$.code'
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' --exclude 'index.html' -p '$.code'
 ```
 
 Every command takes one path or a whole list: a single `-p/--json-path` returns that one bounded result; several paths (repeatable `-p`, several paths after one `-p`, or `--paths-file`) return per-path results `{path, ok, ...}` in one call — `read` yields `{path, ok, type, value}` (per-value cap 600 chars in list mode, `--limit` overrides), `describe` yields a full bounded map per path. Paths file format:
@@ -73,7 +73,7 @@ Every command takes one path or a whole list: a single `-p/--json-path` returns 
 # one json_path per line — blank lines and # comment lines are skipped; duplicates deduped (first wins)
 $.code
 $.data.items[0].title
-$.data.items[-1].shop_info.seller_name
+$.data.items[-1].shop.name
 ```
 
 UTF-8 (BOM tolerated). File lines run first, then any `-p` flags. Total output caps at 80K chars — `read` list mode reports displayed/omitted path results in `shown`/`omitted`; `describe` caps by size, subtrees past the budget return `"omitted": true` with `describe: null` placeholders when those fit (split the list across calls, don't raise limits).
@@ -96,7 +96,7 @@ The count starts **after resolving the selected raw path**: file parsing and the
 
 - Writing a bare `json.load` explorer that re-derives structure the script already maps — your own script is ONLY for math (full-item histograms, counts, cross-checks); every read/slice/map still goes through describe / read.
 - Inventory from item[0]/few slices without the histogram — traps live in later items.
-- Trusting display formats: `"1,299.00"` is a string; `0/1` may not be a bool; JSON-encoded string fields need a second parse.
+- Trusting display formats: `"1,234.56"` is a string; `0/1` may not be a bool; JSON-encoded string fields need a second parse.
 - One pagination mechanism reported when a cursor and numeric paging coexist.
 - Multi-file batches: comparing only the first file before generalizing — a batch can mix page kinds (listing vs detail, SSR vs API); check one representative file per distinct page type.
 - The urge to read the whole file — that's `describe`'s job.
@@ -119,7 +119,7 @@ python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' -p '
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --exclude 'index.html' -p '$.code'
 ```
 
-- **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Repeat `--grep` for multiple keywords: hits merge in document order, each tagged with its `keyword`, and per-keyword `keywords` subtotals are reported (literal matching — `a|b` alternation is not regex; pass repeated `--grep` instead). Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants (e.g. a displayed phrase like "incl. 13% VAT" vs the field-style shorthand "tax-inclusive"), surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
+- **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Repeat `--grep` for multiple keywords: hits merge in document order, each tagged with its `keyword`, and per-keyword `keywords` subtotals are reported (literal matching — `a|b` alternation is not regex; pass repeated `--grep` instead). Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants (the displayed wording often differs from the field-style shorthand: percentages inserted mid-phrase, different term order, or a different word for the same concept), surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
 
 - **Stable script paths:** use an observed `script_id` from `describe --scripts`; its `id_path` can be passed directly to `read -p`. `$#script[id="..."]` matches any exact, case-sensitive HTML id, with the first inline candidate in document order winning even when malformed. No site/framework aliases. Unnamed scripts remain index-addressable. Ordinary JavaScript can have `parse_error` because it is not strict JSON; it is not proof of absent data. Never execute captured scripts.
 - **Keys and structure:** `describe --keys` lists immediate object key names without descending; `key_count`, `shown` and `omitted_count` disclose coverage. HTML `describe` adds bounded tag and tag.class histograms (at most 30 groups each with omission counts). Array `type_counts`/`scanned_count` cover the shallow key/type scan; `sampled_indices` names emitted first/middle/last roots, not all nested values. Path input is capped at 2048 characters; longer enumerated names may not be addressable via `-p`.
