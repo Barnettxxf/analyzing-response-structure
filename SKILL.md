@@ -62,6 +62,9 @@ python <skill_dir>/scripts/inspect_sample.py read '<file>' --paths-file paths.tx
 python <skill_dir>/scripts/inspect_sample.py read '<file>' -x '//tr[@class="product"]' --attr href
 python <skill_dir>/scripts/inspect_sample.py describe '<html>' --scripts
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' -x '//h1/text()'
+python <skill_dir>/scripts/inspect_sample.py read '<file>' --grep 'kw1' --grep 'kw2' --context 100
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' -p '$.code' -p '$.data.total'
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' --exclude 'detail-01.html' -p '$.code'
 ```
 
 Every command takes one path or a whole list: a single `-p/--json-path` returns that one bounded result; several paths (repeatable `-p`, several paths after one `-p`, or `--paths-file`) return per-path results `{path, ok, ...}` in one call — `read` yields `{path, ok, type, value}` (per-value cap 600 chars in list mode, `--limit` overrides), `describe` yields a full bounded map per path. Paths file format:
@@ -110,7 +113,10 @@ python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' -p '
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//h1' -x 'count(//tr)' --text
 python <skill_dir>/scripts/inspect_sample.py read '<html>' -x '//a' --html --show 50
 python <skill_dir>/scripts/inspect_sample.py read '<html>' --grep 'kw' --context 100
+python <skill_dir>/scripts/inspect_sample.py read '<html>' --grep 'kw1' --grep 'kw2' --context 100
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --grep 'kw' --show 5
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' -p '$.code' -p '$.title'
+python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --exclude 'index.html' -p '$.code'
 ```
 
 - **Keyword wrap-up search:** `--grep 'kw'` is a case-insensitive literal search over the same raw text view plain `read` prints — script/JSON content is included, so hits need surrounding-text judgment before becoming evidence. Repeat `--grep` for multiple keywords: hits merge in document order, each tagged with its `keyword`, and per-keyword `keywords` subtotals are reported (literal matching — `a|b` alternation is not regex; pass repeated `--grep` instead). Each hit carries a 0-based character `offset` into that view, `line`, and bounded `context` (`--context N` characters per side, default 80, clamp 0–1000). `--show` caps displayed hits (default 30, clamp 1–200); `count` always covers the full match set. Works per file or with `--files` for the wrap-up pass over unconfirmed fields; pair with the red-flag discipline above — synonyms/variants (e.g. a displayed phrase like "incl. 13% VAT" vs the field-style shorthand "tax-inclusive"), surrounding labels and headers, searched-vs-unsearched disclosure — and re-verify promising hits against the DOM/JSON before recording them as evidence.
@@ -121,4 +127,4 @@ python <skill_dir>/scripts/inspect_sample.py read --files 'captures/*.html' --gr
 - **Grouped/scalar XPath:** repeated `-x` expressions return separate groups. Node-set groups carry `count`/`shown`/`omitted`/`values`; scalar `count()`, `number()`, `string()` and `boolean()` return typed `value`. XPath 2.0 functions such as `distinct-values()` are not offered; use a script for unsupported math.
 - **Output modes:** choose one of `--text`, `--html`, `--attr` for the entire grouped call; use separate calls for different modes. `--html` requires element matches. An attribute XPath already extracts values: `//a/@href` with redundant `--attr href` works; conflicting attribute/text requests return retry guidance.
 - **Limits:** `--show N` controls matches, default 30, positive values clamp to 1–200. `--limit N` controls characters per value, default 2000 for one raw/JSON slice or 600 for lists/XPath, positive values clamp to 16–20000. Zero/negative/non-integer values are rejected. Single descriptions/script listings cap at 24K serialized JSON characters; path-list descriptions, grouped reads and file batches at 80K. These are output characters, not bytes/tokens. Omission placeholders do not count as shown descriptions; truncated-value counts only cover emitted values.
-- **File batches:** one JSON path or one XPath per call; a one-path `--paths-file` also works. Missing fields/file-read errors are per-row failures with exit 0, preserving other rows. Invalid arguments or missing XPath dependency are process errors with exit 1. Multi-path/file matrices and XPath containers in file-batch mode are not supported.
+- **File batches:** accept one XPath, one JSON path (compact flat rows), or multiple JSON paths (nested per-file matrix with per-path `type_summaries`); a `--paths-file` works in all three forms. Missing fields/file-read errors are per-row failures with exit 0, preserving other rows. Invalid arguments or missing XPath dependency are process errors with exit 1. XPath containers (a `-p` selecting HTML inside each file) are not supported in file-batch mode — extract the HTML strings first, then run grouped `-x` per file.
