@@ -1007,6 +1007,50 @@ class V114ContractTests(unittest.TestCase):
         self.assertNotIn("Traceback", res.stdout + res.stderr)
         self.assertIn("deeply nested", res.stdout + res.stderr)
 
+    # --- v1.16.1: describe per-path budget (--limit) ------------------------------
+
+    def test_describe_limit_bounds_subtree(self) -> None:
+        source = self.dir / "wide.json"
+        wide = {
+            f"key{i:02d}": {"nested": {"deep": f"value-{i}-{'x' * 60}"}}
+            for i in range(80)
+        }
+        source.write_text(json.dumps(wide), encoding="utf-8")
+        full = run("describe", str(source), "-p", "$")
+        self.assertEqual(full.returncode, 0, full.stdout + full.stderr)
+        self.assertTrue(json.loads(full.stdout).get("truncated"))
+        slim = run("describe", str(source), "-p", "$", "--limit", "400")
+        self.assertEqual(slim.returncode, 0, slim.stdout + slim.stderr)
+        slim_data = json.loads(slim.stdout)
+        self.assertTrue(slim_data.get("truncated"))
+        self.assertLess(len(slim.stdout), len(full.stdout))
+
+    def test_describe_limit_multi_path_all_fit(self) -> None:
+        source = self.dir / "regions.json"
+        regions = {
+            f"region{i}": {f"leaf{j}": f"{'y' * 80}-{i}-{j}" for j in range(12)}
+            for i in range(6)
+        }
+        source.write_text(json.dumps(regions), encoding="utf-8")
+        paths = [f"$.region{i}" for i in range(6)]
+        no_budget = run("describe", str(source), "-p", *paths)
+        self.assertEqual(no_budget.returncode, 0)
+        with_budget = run("describe", str(source), "-p", *paths, "--limit", "500")
+        self.assertEqual(
+            with_budget.returncode, 0, with_budget.stdout + with_budget.stderr
+        )
+        self.assertLess(len(with_budget.stdout), len(no_budget.stdout))
+
+    def test_describe_limit_validation(self) -> None:
+        source = self.dir / "any.json"
+        source.write_text("{}", encoding="utf-8")
+        res = run("describe", str(source), "-p", "$", "--limit", "abc")
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("--limit", res.stdout)
+        res_zero = run("describe", str(source), "-p", "$", "--limit", "0")
+        self.assertEqual(res_zero.returncode, 0, res_zero.stdout + res_zero.stderr)
+        self.assertNotIn("Traceback", res_zero.stdout + res_zero.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -580,7 +580,7 @@ def _append_digest_entry(
         state["omitted"] += 1
         return False
     size = len(json.dumps(entry, ensure_ascii=False)) + 1
-    if state["entry_chars"] + size > DIGEST_ENTRY_BUDGET:
+    if state["entry_chars"] + size > state.get("entry_budget", DIGEST_ENTRY_BUDGET):
         state["truncated"] = True
         state["stop"] = True
         state["reason"] = "output_limit"
@@ -758,7 +758,11 @@ def _describe_keys(sample: Any, root_path: str) -> dict[str, Any]:
 
 
 def describe_data(
-    sample_path: str | Path, *, json_path: str = "", keys_only: bool = False
+    sample_path: str | Path,
+    *,
+    json_path: str = "",
+    keys_only: bool = False,
+    entry_budget: int | None = None,
 ) -> dict[str, Any]:
     """Return a bounded deep path map compatible with ``read --json-path``."""
     sample = _load_sample(sample_path)
@@ -768,7 +772,7 @@ def describe_data(
             return {"error": sample, "entries": [], "truncated": False}
     if keys_only:
         return _describe_keys(sample, json_path or "$")
-    return _describe_value(sample, json_path or "$")
+    return _describe_value(sample, json_path or "$", entry_budget=entry_budget)
 
 
 def _refresh_array_samples(entries: list[dict[str, Any]]) -> None:
@@ -788,7 +792,9 @@ def _refresh_array_samples(entries: list[dict[str, Any]]) -> None:
         )
 
 
-def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
+def _describe_value(
+    sample: Any, root_path: str, entry_budget: int | None = None
+) -> dict[str, Any]:
     state: dict[str, Any] = {
         "truncated": False,
         "stop": False,
@@ -796,6 +802,7 @@ def _describe_value(sample: Any, root_path: str) -> dict[str, Any]:
         "omitted": 0,
         "entry_chars": 0,
         "annotations": {},
+        "entry_budget": entry_budget if entry_budget else DIGEST_ENTRY_BUDGET,
     }
     entries: list[dict[str, Any]] = []
     _walk_digest(root_path, sample, entries, depth=0, state=state)
@@ -918,7 +925,11 @@ def batch_read(sample_path: str | Path, paths: list[str], limit: int) -> dict:
 
 
 def batch_describe_data(
-    sample_path: str | Path, paths: list[str], *, keys_only: bool = False
+    sample_path: str | Path,
+    paths: list[str],
+    *,
+    keys_only: bool = False,
+    entry_budget: int | None = None,
 ) -> dict:
     """Describe subtrees from one file load, charging the full serialized envelope.
 
@@ -945,7 +956,9 @@ def batch_describe_data(
             row = {"path": jp, "omitted": True, "describe": None}
         else:
             describe = (
-                _describe_keys(node, jp) if keys_only else _describe_value(node, jp)
+                _describe_keys(node, jp)
+                if keys_only
+                else _describe_value(node, jp, entry_budget=entry_budget)
             )
             row = (
                 {"path": jp, "ok": False, "error": describe["error"]}
@@ -1303,6 +1316,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         action="store_true",
         help="object only: bounded key names without descending into values; works with -p and path lists",
     )
+    p_describe.add_argument(
+        "--limit",
+        default=None,
+        help=f"per-path entry budget for describe (default {DIGEST_ENTRY_BUDGET}; clamp 200..{DIGEST_ENTRY_BUDGET})",
+    )
     p_read = sub.add_parser(
         "read",
         aliases=["batch", "batch_read"],
@@ -1455,6 +1473,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                 path is not None
             )  # Only read accepts --files without a positional file.
             legacy_batch = args.command == "batch_describe"
+            desc_budget = DIGEST_ENTRY_BUDGET
+            if getattr(args, "limit", None) is not None and hasattr(args, "keys"):
+                try:
+                    desc_budget = int(str(args.limit).strip())
+                except ValueError:
+                    print("[inspect_sample] --limit must be a positive integer")
+                    return 1
+                if desc_budget < 200:
+                    desc_budget = 200
+                desc_budget = min(desc_budget, DIGEST_ENTRY_BUDGET)
             if args.keys and args.xpath:
                 print(
                     "[inspect_sample] --keys describes JSON object keys; use -p, not -x"
@@ -1540,16 +1568,25 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                         "[inspect_sample] no paths given — use -p/--json-path or --paths-file"
                     )
                     return 1
-                result = describe_data(path, keys_only=args.keys)
+                result = describe_data(
+                    path, keys_only=args.keys, entry_budget=desc_budget
+                )
                 print(json.dumps(result, ensure_ascii=False))
                 return 1 if args.keys and "error" in result else 0
             if len(paths) == 1 and not legacy_batch:
-                result = describe_data(path, json_path=paths[0], keys_only=args.keys)
+                result = describe_data(
+                    path,
+                    json_path=paths[0],
+                    keys_only=args.keys,
+                    entry_budget=desc_budget,
+                )
                 print(json.dumps(result, ensure_ascii=False))
                 return 1 if args.keys and "error" in result else 0
             print(
                 json.dumps(
-                    batch_describe_data(path, paths, keys_only=args.keys),
+                    batch_describe_data(
+                        path, paths, keys_only=args.keys, entry_budget=desc_budget
+                    ),
                     ensure_ascii=False,
                 )
             )
