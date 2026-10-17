@@ -1402,9 +1402,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         if any(not keyword.strip() for keyword in args.grep):
             print("[inspect_sample] --grep needs a non-empty literal keyword")
             return 1
-        args.grep = list(
-            dict.fromkeys(k.lower() for k in args.grep)
-        )  # case-insensitive dedupe
+        seen: dict[str, str] = {}  # lowercase → first-occurring original form
+        for keyword in args.grep:
+            seen.setdefault(keyword.lower(), keyword)
+        args.grep = list(seen.values())  # case-insensitive dedupe, preserve casing
         if args.xpath or args.attr is not None or args.text or args.html:
             print(
                 "[inspect_sample] --grep is its own channel; it cannot be combined with -p/-x/--attr/--text/--html"
@@ -1677,10 +1678,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                                     else None
                                 )
                             vo_results[rel] = file_data
-                    print(
-                        json.dumps(_fit_output_budget(vo_results), ensure_ascii=False)
-                    )
-                    return 0
+                    vo_payload = _fit_output_budget(vo_results)
+                    print(json.dumps(vo_payload, ensure_ascii=False))
+                    return 1 if "error" in vo_payload else 0
                 if args.grep is not None:
                     grep_results = []
                     for fp in files:
@@ -1744,6 +1744,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                             row.update(
                                 ok=False,
                                 error=_bounded_text(f"cannot read {fp}: {exc}", 400),
+                                shown=0,
+                                omitted=len(paths),
                             )
                             matrix_results.append(row)
                             continue
