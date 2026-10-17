@@ -32,6 +32,7 @@ Never guess what a response contains — observe it. `inspect_sample.py` reads c
 - Only items[0] seen — variance (optional fields, type flips, nulls) hides in later items.
 - The capture is HTML — the real data usually lives in embedded JSON `<script>` blocks.
 - A data-source/API integration task — map the real captured response before writing any client code or field mapping.
+- No captures yet, but the source is reachable? Download a few sample responses to local files first (one file per endpoint/page state, and vary the sampled item so variants show up) — then analyze them with this skill; batch mode compares shapes across samples in one call.
 
 Skip: small config files — a direct read is cheaper.
 
@@ -46,7 +47,8 @@ Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-spe
 3. **Slice**: `read --json-path` the first, a middle, and the LAST element (default 2000 chars covers most object slices); diff key sets and types — item[0]-only inventories are guesses. Many fields at once? `read -p '$.a' -p '$.b'` returns path+type+value for a whole list; many subtrees to map? `describe -p ...` does it in one call.
 4. **Prove variance** (arrays ≥100): describe now reports `union_keys` (occurrence counts + JSON-type distributions incl. null — heterogeneous arrays like page-section lists where every section has a different schema show every variant), `element_types`, `sampled_indices` and `unsampled_count` — cite these as baseline evidence. For cross-field math (sums, min/max, unit conversions) still run a tiny stdlib script; never write "verified across all items" without either the built-in union or your own scan.
 5. **Hunt embedded JSON**: every inline `<script>` is a candidate in the map as `#script[0]`, `#script[1]`, … annotated with id/type/parse status — a `parse_error` candidate (JS assignment, malformed JSON) is a finding, not absence; its raw head is readable at that path. JS-variable assignments still need manual decode of the raw head.
-6. **Inventory**: report per the contract; every stated path/type comes from an observed slice or the histogram — mark anything else UNVERIFIED, never guess.
+6. **Survey shapes across files before writing the extractor**: when several captures of the same kind exist, run the batch matrix (`read --files ... --paths-file regions.txt`) over the key regions — per-path cross-file `type_summaries` expose shape variance (a cell that is a plain URL string in some captures and a nested object/array of URLs in others, etc.). Write the extractor from the union of observed shapes; extracting from one file's shape silently drops the variants that live in the others.
+7. **Inventory**: report per the contract; every stated path/type comes from an observed slice or the histogram — mark anything else UNVERIFIED, never guess.
 
 ## Quick Reference
 
