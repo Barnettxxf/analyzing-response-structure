@@ -39,8 +39,13 @@ PAGINATION_KEY_RE = re.compile(
 )
 PAGINATION_CANDIDATE_CAP = 20
 MAX_DIGEST_OUTPUT_CHARS = 24_000
+
+# Per-entry budget for describe maps. Default tuned from field feedback (v1.16
+# round: 3/4 arms hit the old 11000 default's truncation wall and asked for
+# per-path control; 900 lets 3-8 typical subtree paths fit one call).
+DIGEST_ENTRY_BUDGET = 900
+MAX_ENTRY_BUDGET = 11_000
 MAX_READ_SAMPLE_CHARS = 20_000
-DIGEST_ENTRY_BUDGET = 11_000
 DEFAULT_READ_LIMIT = 2000
 BATCH_VALUE_LIMIT = 600
 BATCH_TOTAL_CHARS = 80_000
@@ -1319,7 +1324,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
     p_describe.add_argument(
         "--limit",
         default=None,
-        help=f"per-path entry budget for describe (default {DIGEST_ENTRY_BUDGET}; clamp 200..{DIGEST_ENTRY_BUDGET})",
+        help=f"per-path entry budget for describe (default {DIGEST_ENTRY_BUDGET}; clamp 200..{MAX_ENTRY_BUDGET})",
     )
     p_read = sub.add_parser(
         "read",
@@ -1393,6 +1398,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         help="case-insensitive literal keyword search over the raw text view (bounded context hits; repeatable = merged multi-keyword hits; works with --files)",
     )
     p_read.add_argument(
+        "--files-file",
+        default=None,
+        help="literal file paths, one per line (# comments/blanks skipped) — batch an arbitrary file subset without glob",
+    )
+    p_read.add_argument(
         "--exclude",
         action="append",
         default=[],
@@ -1460,8 +1470,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
             return 1
         show = min(show, MAX_MATCH_SHOW)
 
-    if not args.file and not getattr(args, "files", None):
-        print("[inspect_sample] file is required (or use --files for batch mode)")
+    if (
+        not args.file
+        and not getattr(args, "files", None)
+        and not getattr(args, "files_file", None)
+    ):
+        print(
+            "[inspect_sample] file is required (or use --files/--files-file for batch mode)"
+        )
         return 1
     path = Path(args.file) if args.file else None
     if path is not None and not path.is_file():
@@ -1482,7 +1498,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     return 1
                 if desc_budget < 200:
                     desc_budget = 200
-                desc_budget = min(desc_budget, DIGEST_ENTRY_BUDGET)
+                desc_budget = min(desc_budget, MAX_ENTRY_BUDGET)
             if args.keys and args.xpath:
                 print(
                     "[inspect_sample] --keys describes JSON object keys; use -p, not -x"
@@ -1559,7 +1575,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                 if "error" in result:
                     print(json.dumps(result, ensure_ascii=False))
                     return 1
-                print(json.dumps(_describe_value(result, "$"), ensure_ascii=False))
+                print(
+                    json.dumps(
+                        _describe_value(result, "$", entry_budget=desc_budget),
+                        ensure_ascii=False,
+                    )
+                )
                 return 0
             paths = _gather_paths(args)
             if not paths:
@@ -1598,13 +1619,84 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     "[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x"
                 )
                 return 1
-            if getattr(args, "files", None):
+            if getattr(args, "files", None) or getattr(args, "files_file", None):
                 if legacy_batch:
                     print(
                         "[inspect_sample] batch mode (--files) is a plain `read` feature — batch aliases do not carry it"
                     )
                     return 1
+                if getattr(args, "files", None) and getattr(args, "files_file", None):
+                    print("[inspect_sample] use --files or --files-file, not both")
+                    return 1
                 paths = _gather_paths(args)
+                if getattr(args, "files_file", None):
+                    literal_files: list[str] = []
+                    with open(args.files_file, encoding="utf-8-sig") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if line and not line.startswith("#"):
+                                literal_files.append(line)
+                    if not literal_files:
+                        print(
+                            f"[inspect_sample] --files-file {args.files_file} contains no file paths"
+                        )
+                        return 1
+                    missing = [p for p in literal_files if not os.path.isfile(p)]
+                    if missing:
+                        print(
+                            "[inspect_sample] --files-file paths not found: "
+                            + ", ".join(missing[:10])
+                        )
+                        return 1
+                    files = sorted({str(Path(f).resolve()) for f in literal_files})
+                    if len(files) == 1:
+                        glob_root = os.path.dirname(files[0])
+                    else:
+                        glob_root = os.path.commonpath(files)
+                else:
+                    patterns = [pat for occ in (args.files or []) for pat in occ]
+                    if not patterns:
+                        print(
+                            "[inspect_sample] batch mode needs at least one --files glob pattern"
+                        )
+                        return 1
+                    files = sorted(
+                        {
+                            str(Path(f).resolve())
+                            for pat in patterns
+                            for f in glob.glob(pat)
+                            if Path(f).is_file()
+                        }
+                    )
+                    excludes = [
+                        pat.strip()
+                        for occ in (getattr(args, "exclude", None) or [])
+                        for pat in (occ if isinstance(occ, list) else [occ])
+                        if isinstance(pat, str) and pat.strip()
+                    ]
+                    if excludes:
+                        files = [
+                            f
+                            for f in files
+                            if not any(
+                                fnmatch.fnmatch(os.path.basename(f), pat)
+                                or fnmatch.fnmatch(f, pat)
+                                for pat in excludes
+                            )
+                        ]
+                    if not files:
+                        print(
+                            f"[inspect_sample] no files remain after excludes: {', '.join(patterns)} | excluded by: {', '.join(excludes)}"
+                            if excludes
+                            else f"[inspect_sample] no files match: {', '.join(patterns)}"
+                        )
+                        return 1
+                    glob_root = os.path.dirname(patterns[0])
+                patterns = (
+                    patterns
+                    if getattr(args, "files", None)
+                    else [f"--files-file {args.files_file}"]
+                )
                 xpaths = [
                     x.strip()
                     for occ in (args.xpath or [])
@@ -1632,44 +1724,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                         "[inspect_sample] batch mode needs at least one -p path (or one -x XPath)"
                     )
                     return 1
-                patterns = [pat for occ in (args.files or []) for pat in occ]
-                if not patterns:
-                    print(
-                        "[inspect_sample] batch mode needs at least one --files glob pattern"
-                    )
-                    return 1
-                files = sorted(
-                    {
-                        str(Path(f).resolve())
-                        for pat in patterns
-                        for f in glob.glob(pat)
-                        if Path(f).is_file()
-                    }
-                )
-                excludes = [
-                    pat.strip()
-                    for occ in (getattr(args, "exclude", None) or [])
-                    for pat in (occ if isinstance(occ, list) else [occ])
-                    if isinstance(pat, str) and pat.strip()
-                ]
-                if excludes:
-                    files = [
-                        f
-                        for f in files
-                        if not any(
-                            fnmatch.fnmatch(os.path.basename(f), pat)
-                            or fnmatch.fnmatch(f, pat)
-                            for pat in excludes
-                        )
-                    ]
-                if not files:
-                    print(
-                        f"[inspect_sample] no files remain after excludes: {', '.join(patterns)} | excluded by: {', '.join(excludes)}"
-                        if excludes
-                        else f"[inspect_sample] no files match: {', '.join(patterns)}"
-                    )
-                    return 1
-                glob_root = os.path.dirname(patterns[0])
                 if args.value_only and paths:
                     limit, limit_err = _parse_limit(args.limit, BATCH_VALUE_LIMIT)
                     if limit_err:

@@ -99,7 +99,7 @@ class InspectSampleTests(unittest.TestCase):
     # --- describe -----------------------------------------------------------
 
     def test_describe_json_shape_and_bound(self):
-        res = run("describe", str(self.json_file))
+        res = run("describe", str(self.json_file), "--limit", "11000")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertLessEqual(len(res.stdout), 24_100)  # ceiling 24k + newline slack
         payload = json.loads(res.stdout)
@@ -540,7 +540,7 @@ class InspectSampleTests(unittest.TestCase):
         )
         f = self.dir / "floors.json"
         f.write_text(raw, encoding="utf-8")
-        res = run("describe", str(f))
+        res = run("describe", str(f), "--limit", "11000")
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         entry = next(e for e in payload["entries"] if e["path"] == "$.floors")
@@ -586,7 +586,7 @@ class InspectSampleTests(unittest.TestCase):
         raw = json.dumps({"rows": [big, big]})
         f = self.dir / "big.json"
         f.write_text(raw, encoding="utf-8")
-        payload = json.loads(run("describe", str(f)).stdout)
+        payload = json.loads(run("describe", str(f), "--limit", "11000").stdout)
         entry = next(e for e in payload["entries"] if e["path"] == "$.rows")
         self.assertLessEqual(len(entry["union_keys"]), 40)
         self.assertTrue(entry.get("union_keys_truncated"))
@@ -925,7 +925,14 @@ class InspectSampleTests(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_describe_xpath_matches(self):
-        res = run("describe", str(self.html_page), "-x", '//div[@class="card"]')
+        res = run(
+            "describe",
+            str(self.html_page),
+            "-x",
+            '//div[@class="card"]',
+            "--limit",
+            "11000",
+        )
         self.assertEqual(res.returncode, 0, res.stderr)
         payload = json.loads(res.stdout)
         paths = {e["path"] for e in payload["entries"]}

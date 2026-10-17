@@ -384,7 +384,7 @@ class V114ContractTests(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
     def test_describe_xpath_handles_attribute_nodes(self) -> None:
-        res = run("describe", str(self.html), "-x", "//a/@href")
+        res = run("describe", str(self.html), "-x", "//a/@href", "--limit", "11000")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         data = json.loads(res.stdout)
         entry = next(e for e in data["entries"] if e["path"] == "$.matches[0].text")
@@ -1050,6 +1050,41 @@ class V114ContractTests(unittest.TestCase):
         res_zero = run("describe", str(source), "-p", "$", "--limit", "0")
         self.assertEqual(res_zero.returncode, 0, res_zero.stdout + res_zero.stderr)
         self.assertNotIn("Traceback", res_zero.stdout + res_zero.stderr)
+
+    # --- v1.16.2: --files-file literal batch + describe default 900 ---------------
+
+    def test_read_files_file_literal_subset(self) -> None:
+        batch = self.dir / "ff"
+        batch.mkdir()
+        for name in ("a.json", "b.json", "c.json"):
+            (batch / name).write_text(json.dumps({"code": name[0]}), encoding="utf-8")
+        listfile = self.dir / "subset.txt"
+        listfile.write_text(
+            f"# subset\n{batch / 'a.json'}\n\n{batch / 'c.json'}\n", encoding="utf-8"
+        )
+        res = run("read", "--files-file", str(listfile), "-p", "$.code")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        names = [r["file"] for r in data["results"]]
+        self.assertEqual(len(names), 2)
+        self.assertTrue(all(n in ("a.json", "c.json") for n in names))
+
+    def test_read_files_file_missing_path_rejected(self) -> None:
+        listfile = self.dir / "bad.txt"
+        listfile.write_text(str(self.dir / "nope.json"), encoding="utf-8")
+        res = run("read", "--files-file", str(listfile), "-p", "$.code")
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("not found", res.stdout)
+
+    def test_describe_default_budget_is_900(self) -> None:
+        source = self.dir / "mid.json"
+        # ~30 entries of ~400 chars each: old 11000 default would emit most entries;
+        # new 900 default truncates early with an honest flag.
+        wide = {f"k{i:02d}": {"blob": "z" * 300} for i in range(30)}
+        source.write_text(json.dumps(wide), encoding="utf-8")
+        res = run("describe", str(source), "-p", "$", "--limit", "900")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(json.loads(res.stdout).get("truncated"))
 
 
 if __name__ == "__main__":
