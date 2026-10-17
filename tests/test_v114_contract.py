@@ -926,5 +926,61 @@ class V114ContractTests(unittest.TestCase):
         self.assertLess(len(with_vo.stdout), len(without.stdout))
 
 
+    # --- v1.16: [*] wildcard projection ------------------------------------------
+
+    def test_read_wildcard_array_projection(self) -> None:
+        source = self.dir / "wc.json"
+        source.write_text(json.dumps({
+            "items": [
+                {"label": "alpha", "value": 1},
+                {"label": "beta", "value": 2},
+                {"label": "gamma", "value": 3},
+            ]
+        }), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.items[*].label")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data, ["alpha", "beta", "gamma"])
+
+    def test_read_wildcard_returns_full_elements(self) -> None:
+        source = self.dir / "wc2.json"
+        source.write_text(json.dumps({"tags": ["x", "y"]}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.tags[*]")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(json.loads(res.stdout), ["x", "y"])
+
+    def test_read_wildcard_empty_array(self) -> None:
+        source = self.dir / "empty.json"
+        source.write_text(json.dumps({"items": []}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.items[*].label")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(json.loads(res.stdout), [])
+
+    def test_read_wildcard_non_array_is_error(self) -> None:
+        source = self.dir / "scalar.json"
+        source.write_text(json.dumps({"code": 0}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.code[*]")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("array", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_wildcard_scalar_field_returns_values(self) -> None:
+        source = self.dir / "vals.json"
+        source.write_text(json.dumps({"prices": ["¥100", "¥200", "¥300"]}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.prices[*]")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(json.loads(res.stdout), ["¥100", "¥200", "¥300"])
+
+    def test_read_wildcard_with_value_only(self) -> None:
+        source = self.dir / "vowc.json"
+        source.write_text(json.dumps({
+            "items": [{"label": "a"}, {"label": "b"}, {"label": "c"}],
+        }), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.items[*].label", "--value-only")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["$.items[*].label"], ["a", "b", "c"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -271,14 +271,16 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
             if end < 0:
                 return "unclosed [] path segment"
             raw = json_path[index + 1 : end]
-            if digit_index.fullmatch(raw):
+            if raw == "*":
+                tokens.append(("wildcard", None))
+            elif digit_index.fullmatch(raw):
                 tokens.append(("index", int(raw)))
             elif neg_index.fullmatch(raw):
                 tokens.append(("index", int(raw)))
             else:
                 key = _path_string(raw)
                 if key is _PARSE_FAILED:
-                    return "[] accepts an integer index or a single-/double-quoted string key"
+                    return "[] accepts an integer index, [*], or a single-/double-quoted string key"
                 tokens.append(("key", key))
             index = end + 1
             continue
@@ -311,6 +313,26 @@ def _bounded_json_text(value: Any, limit: int) -> str:
     return "".join(chunks)
 
 
+def _tokens_to_path(tokens: list[tuple[str, Any]]) -> str:
+    """Reconstruct a human-readable path string from parsed tokens."""
+    parts = ["$"]
+    for kind, value in tokens:
+        if kind == "key":
+            if IDENTIFIER_RE.fullmatch(str(value)):
+                parts.append(f".{value}")
+            else:
+                parts.append(f"[{json.dumps(value, ensure_ascii=False)}]")
+        elif kind == "index":
+            parts.append(f"[{value}]")
+        elif kind == "wildcard":
+            parts.append("[*]")
+        elif kind == "script":
+            parts.append(f"#script[{value}]")
+        elif kind == "script_id":
+            parts.append(f'#script[id="{value}"]')
+    return "".join(parts)
+
+
 def _path_error(message: str) -> str:
     return _bounded_text(f"[json_path] {message}", MAX_READ_SAMPLE_CHARS)
 
@@ -322,10 +344,52 @@ def _property_path(path: str, key: str) -> str:
 
 
 def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
-    """Resolve to the original subtree, distinguishing data from bounded path errors."""
+    """Resolve to the original subtree, distinguishing data from bounded path errors.
+
+    Supports ``[*]`` wildcard: resolve the prefix to an array, then for each
+    element resolve the suffix, returning the collected list of results.
+    """
     tokens = _tokenize_json_path(json_path)
     if isinstance(tokens, str):
         return False, _path_error(tokens)
+    # Split at the first wildcard: prefix → array, suffix → per-element path.
+    wildcard_idx = next(
+        (i for i, (kind, _) in enumerate(tokens) if kind == "wildcard"), None
+    )
+    if wildcard_idx is not None:
+        prefix_tokens = tokens[:wildcard_idx]
+        suffix_tokens = tokens[wildcard_idx + 1 :]
+        prefix_path = _tokens_to_path(prefix_tokens)
+        node = sample
+        for kind, value in prefix_tokens:
+            if kind == "key":
+                if not isinstance(node, dict) or value not in node:
+                    return False, _path_error(f"wildcard prefix {prefix_path}: key {value!r} not found")
+                node = node[value]
+            elif kind == "index":
+                if not isinstance(node, list) or value >= len(node) or value < 0:
+                    return False, _path_error(f"wildcard prefix {prefix_path}: index [{value}] out of range")
+                node = node[value]
+            elif kind in ("script", "script_id"):
+                found, sub = _select_json_path(node, _tokens_to_path([(kind, value)]))
+                if not found:
+                    return False, sub
+                node = sub
+        if not isinstance(node, list):
+            return False, _path_error(
+                f"{prefix_path} is not a list; wildcard [*] requires array (got {_json_type_name(node)})"
+            )
+        suffix_path = _tokens_to_path(suffix_tokens)
+        results = []
+        for elem in node:
+            if suffix_tokens:
+                found, sub = _select_json_path(elem, suffix_path)
+                if found:
+                    results.append(sub)
+                # skip elements where suffix doesn't resolve
+            else:
+                results.append(elem)
+        return True, results
     node = sample
     prefix = "$"
     for kind, value in tokens:

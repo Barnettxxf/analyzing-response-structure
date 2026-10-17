@@ -32,6 +32,12 @@ python scripts/inspect_sample.py read capture.json -p '$.data.items[-1]'
 python scripts/inspect_sample.py read capture.json -p '$.code' -p '$.data.items[0]'
 python scripts/inspect_sample.py read capture.json --paths-file paths.txt
 
+# Array projection: for each element, get the named field.
+python scripts/inspect_sample.py read capture.json -p '$.data.items[*].title'
+
+# Compact multi-path output: flat {path: value} without structural envelope.
+python scripts/inspect_sample.py read capture.json -p '$.code' -p '$.label' --value-only
+
 # Discover script IDs before using a stable, case-sensitive ID selector.
 python scripts/inspect_sample.py describe page.html --scripts
 python scripts/inspect_sample.py read page.html -p '$#script[id="app-state"].props'
