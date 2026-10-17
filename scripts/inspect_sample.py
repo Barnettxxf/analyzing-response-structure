@@ -1277,6 +1277,11 @@ def main(argv: list[str] | None = None) -> int:
         "--html", action="store_true", help="with -x: extract each match's outer HTML"
     )
     p_read.add_argument(
+        "--value-only",
+        action="store_true",
+        help="with -p (multi-path or --files batch): output only {path: value} pairs without structural metadata",
+    )
+    p_read.add_argument(
         "--limit",
         default=None,
         help=f"characters per value (single default {DEFAULT_READ_LIMIT}; lists/XPath {BATCH_VALUE_LIMIT}; positive values clamp {LIMIT_MIN}..{MAX_READ_SAMPLE_CHARS})",
@@ -1548,6 +1553,32 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 1
                 glob_root = os.path.dirname(patterns[0])
+                if args.value_only and paths:
+                    vo_results: dict[str, Any] = {}
+                    for fp in files:
+                        rel = (
+                            os.path.relpath(fp, glob_root)
+                            if glob_root
+                            else Path(fp).name
+                        )
+                        try:
+                            sample = _load_sample(fp)
+                        except OSError as exc:
+                            vo_results[rel] = {
+                                "__error__": _bounded_text(str(exc), 200)
+                            }
+                            continue
+                        if len(paths) == 1:
+                            found, node = _select_json_path(sample, paths[0])
+                            vo_results[rel] = node if found else None
+                        else:
+                            file_data: dict[str, Any] = {}
+                            for jp in paths:
+                                found, node = _select_json_path(sample, jp)
+                                file_data[jp] = node if found else None
+                            vo_results[rel] = file_data
+                    print(json.dumps(vo_results, ensure_ascii=False))
+                    return 0
                 if args.grep is not None:
                     grep_results = []
                     for fp in files:
@@ -1838,6 +1869,14 @@ def main(argv: list[str] | None = None) -> int:
             if limit_err:
                 print(limit_err)
                 return 1
+            if args.value_only:
+                sample = _load_sample(path)
+                vo: dict[str, Any] = {}
+                for jp in paths:
+                    found, node = _select_json_path(sample, jp)
+                    vo[jp] = node if found else None
+                print(json.dumps(_fit_output_budget(vo), ensure_ascii=False))
+                return 0
             if not paths:
                 if legacy_batch:
                     print(
@@ -1856,7 +1895,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(out)
                 return 0
             payload = batch_read(path, paths, min(limit, MAX_READ_SAMPLE_CHARS))
-            print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+            if getattr(args, "value_only", False):
+                compact = {}
+                for r in payload["results"]:
+                    compact[r["path"]] = r.get("value") if r.get("ok") else None
+                print(json.dumps(_fit_output_budget(compact), ensure_ascii=False))
+            else:
+                print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
             return 0
         print(f"[inspect_sample] unknown command: {args.command}")
         return 1

@@ -830,6 +830,65 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1, res.stdout)
         self.assertIn("non-empty", res.stdout)
 
+    # --- --value-only compact output ---------------------------------------------
+
+    def test_read_value_only_multi_path_compact(self) -> None:
+        source = self.dir / "vo.json"
+        source.write_text(
+            json.dumps({"code": 0, "message": "success"}), encoding="utf-8"
+        )
+        res = run(
+            "read", str(source), "-p", "$.code", "-p", "$.message", "--value-only"
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data, {"$.code": 0, "$.message": "success"})
+
+    def test_read_value_only_missing_path_is_null(self) -> None:
+        source = self.dir / "vo.json"
+        source.write_text(json.dumps({"code": 0}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.code", "-p", "$.nope", "--value-only")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["$.code"], 0)
+        self.assertIsNone(data["$.nope"])
+
+    def test_read_value_only_files_batch(self) -> None:
+        batch = self.dir / "vobatch"
+        batch.mkdir()
+        for name, code in (("a.json", 1), ("b.json", 2)):
+            (batch / name).write_text(
+                json.dumps({"code": code, "label": name}), encoding="utf-8"
+            )
+        res = run(
+            "read",
+            "--files",
+            str(batch / "*.json"),
+            "-p",
+            "$.code",
+            "-p",
+            "$.label",
+            "--value-only",
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["a.json"], {"$.code": 1, "$.label": "a.json"})
+        self.assertEqual(data["b.json"], {"$.code": 2, "$.label": "b.json"})
+
+    def test_read_value_more_data_in_same_budget(self) -> None:
+        source = self.dir / "many.json"
+        source.write_text(
+            json.dumps({f"k{i}": i for i in range(200)}), encoding="utf-8"
+        )
+        paths = [f"$.k{i}" for i in range(200)]
+        with_vo = run(
+            "read", str(source), "-p", *paths, "--value-only", "--limit", "100"
+        )
+        without = run("read", str(source), "-p", *paths, "--limit", "100")
+        self.assertEqual(with_vo.returncode, 0)
+        self.assertEqual(without.returncode, 0)
+        self.assertLess(len(with_vo.stdout), len(without.stdout))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

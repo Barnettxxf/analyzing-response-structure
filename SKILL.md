@@ -67,6 +67,7 @@ python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.htm
 python <skill_dir>/scripts/inspect_sample.py read '<file>' --grep 'kw1' --grep 'kw2' --context 100
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' -p '$.code' -p '$.data.total'
 python <skill_dir>/scripts/inspect_sample.py read --files 'captures\detail-*.html' --exclude 'index.html' -p '$.code'
+python <skill_dir>/scripts/inspect_sample.py read '<file>' -p '$.code' -p '$.label' --value-only
 ```
 
 Every command takes one path or a whole list: a single `-p/--json-path` returns that one bounded result; several paths (repeatable `-p`, several paths after one `-p`, or `--paths-file`) return per-path results `{path, ok, ...}` in one call — `read` yields `{path, ok, type, value}` (per-value cap 600 chars in list mode, `--limit` overrides), `describe` yields a full bounded map per path. Paths file format:
