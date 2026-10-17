@@ -1670,6 +1670,13 @@ def main(argv: list[str] | None = None) -> int:
                                         else _bounded_json_text(node, limit),
                                         limit,
                                     ),
+                                    **(
+                                        {"len": len(node)}
+                                        if isinstance(node, list)
+                                        else {"key_count": len(node)}
+                                        if isinstance(node, dict)
+                                        else {}
+                                    ),
                                 }
                             )
                         shown_paths = len(row["results"])
@@ -1760,6 +1767,10 @@ def main(argv: list[str] | None = None) -> int:
                                     limit,
                                 ),
                             )
+                            if isinstance(node, list):
+                                row["len"] = len(node)
+                            elif isinstance(node, dict):
+                                row["key_count"] = len(node)
                     shown += 1
                     results.append(row)
                 payload = {

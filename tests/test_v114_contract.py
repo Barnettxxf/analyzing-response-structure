@@ -751,6 +751,42 @@ class V114ContractTests(unittest.TestCase):
             data["type_summary"], {"integer": 1, "string": 1}
         )  # 单路径契约不变
 
+    def test_read_files_batch_len_and_key_count(self) -> None:
+        batch = self.dir / "lenbatch"
+        batch.mkdir()
+        (batch / "a.json").write_text(
+            json.dumps({"arr": [1, 2, 3], "obj": {"x": 1}}), encoding="utf-8"
+        )
+        res_arr = run(
+            "read", "--files", str(batch / "a.json"), "-p", "$.arr"
+        )
+        res_obj = run(
+            "read", "--files", str(batch / "a.json"), "-p", "$.obj"
+        )
+        self.assertEqual(res_arr.returncode, 0, res_arr.stdout + res_arr.stderr)
+        self.assertEqual(res_obj.returncode, 0, res_obj.stdout + res_obj.stderr)
+        self.assertEqual(
+            json.loads(res_arr.stdout)["results"][0]["len"], 3
+        )
+        self.assertEqual(
+            json.loads(res_obj.stdout)["results"][0]["key_count"], 1
+        )
+
+    def test_read_files_matrix_len_key_count(self) -> None:
+        batch = self.dir / "lenmatrix"
+        batch.mkdir()
+        (batch / "a.json").write_text(
+            json.dumps({"arr": [1, 2], "obj": {"x": 1}}), encoding="utf-8"
+        )
+        res = run(
+            "read", "--files", str(batch / "a.json"), "-p", "$.arr", "-p", "$.obj"
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        nested = {r["path"]: r for r in data["results"][0]["results"]}
+        self.assertEqual(nested["$.arr"]["len"], 2)
+        self.assertEqual(nested["$.obj"]["key_count"], 1)
+
     def test_read_files_exclude_glob_filters_collected_files(self) -> None:
         batch = self.dir / "excl"
         batch.mkdir()
