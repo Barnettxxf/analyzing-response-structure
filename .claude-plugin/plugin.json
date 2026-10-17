@@ -1,6 +1,6 @@
 {
   "name": "analyzing-response-structure",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "description": "Bounded offline inspection of captured JSON/HTML: stable script IDs, key maps, HTML structure counts and grouped XPath. Python 3.9+ stdlib core; XPath uses optional parsel.",
   "author": { "name": "Barnett Xu" },
   "homepage": "https://github.com/Barnettxxf/analyzing-response-structure",

@@ -757,20 +757,12 @@ class V114ContractTests(unittest.TestCase):
         (batch / "a.json").write_text(
             json.dumps({"arr": [1, 2, 3], "obj": {"x": 1}}), encoding="utf-8"
         )
-        res_arr = run(
-            "read", "--files", str(batch / "a.json"), "-p", "$.arr"
-        )
-        res_obj = run(
-            "read", "--files", str(batch / "a.json"), "-p", "$.obj"
-        )
+        res_arr = run("read", "--files", str(batch / "a.json"), "-p", "$.arr")
+        res_obj = run("read", "--files", str(batch / "a.json"), "-p", "$.obj")
         self.assertEqual(res_arr.returncode, 0, res_arr.stdout + res_arr.stderr)
         self.assertEqual(res_obj.returncode, 0, res_obj.stdout + res_obj.stderr)
-        self.assertEqual(
-            json.loads(res_arr.stdout)["results"][0]["len"], 3
-        )
-        self.assertEqual(
-            json.loads(res_obj.stdout)["results"][0]["key_count"], 1
-        )
+        self.assertEqual(json.loads(res_arr.stdout)["results"][0]["len"], 3)
+        self.assertEqual(json.loads(res_obj.stdout)["results"][0]["key_count"], 1)
 
     def test_read_files_matrix_len_key_count(self) -> None:
         batch = self.dir / "lenmatrix"
@@ -925,18 +917,22 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(without.returncode, 0)
         self.assertLess(len(with_vo.stdout), len(without.stdout))
 
-
     # --- v1.16: [*] wildcard projection ------------------------------------------
 
     def test_read_wildcard_array_projection(self) -> None:
         source = self.dir / "wc.json"
-        source.write_text(json.dumps({
-            "items": [
-                {"label": "alpha", "value": 1},
-                {"label": "beta", "value": 2},
-                {"label": "gamma", "value": 3},
-            ]
-        }), encoding="utf-8")
+        source.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {"label": "alpha", "value": 1},
+                        {"label": "beta", "value": 2},
+                        {"label": "gamma", "value": 3},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         res = run("read", str(source), "-p", "$.items[*].label")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         data = json.loads(res.stdout)
@@ -966,20 +962,50 @@ class V114ContractTests(unittest.TestCase):
 
     def test_read_wildcard_scalar_field_returns_values(self) -> None:
         source = self.dir / "vals.json"
-        source.write_text(json.dumps({"prices": ["¥100", "¥200", "¥300"]}), encoding="utf-8")
+        source.write_text(
+            json.dumps({"prices": ["¥100", "¥200", "¥300"]}), encoding="utf-8"
+        )
         res = run("read", str(source), "-p", "$.prices[*]")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(json.loads(res.stdout), ["¥100", "¥200", "¥300"])
 
     def test_read_wildcard_with_value_only(self) -> None:
         source = self.dir / "vowc.json"
-        source.write_text(json.dumps({
-            "items": [{"label": "a"}, {"label": "b"}, {"label": "c"}],
-        }), encoding="utf-8")
+        source.write_text(
+            json.dumps(
+                {
+                    "items": [{"label": "a"}, {"label": "b"}, {"label": "c"}],
+                }
+            ),
+            encoding="utf-8",
+        )
         res = run("read", str(source), "-p", "$.items[*].label", "--value-only")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         data = json.loads(res.stdout)
         self.assertEqual(data["$.items[*].label"], ["a", "b", "c"])
+
+    def test_read_wildcard_suffix_miss_disclosed_as_null(self) -> None:
+        source = self.dir / "partial.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "items": [{"label": "a"}, {"other": 1}, {"label": "c"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        res = run("read", str(source), "-p", "$.items[*].label")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data, ["a", None, "c"])
+
+    def test_read_recursion_error_is_guidance(self) -> None:
+        source = self.dir / "deep.json"
+        source.write_text("[" * 6000 + "]" * 6000, encoding="utf-8")
+        res = run("read", str(source), "-p", "$")
+        self.assertEqual(res.returncode, 1, res.stdout[:100] + res.stderr[:100])
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+        self.assertIn("deeply nested", res.stdout + res.stderr)
 
 
 if __name__ == "__main__":

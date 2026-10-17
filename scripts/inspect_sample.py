@@ -364,12 +364,21 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
         for kind, value in prefix_tokens:
             if kind == "key":
                 if not isinstance(node, dict) or value not in node:
-                    return False, _path_error(f"wildcard prefix {prefix_path}: key {value!r} not found")
+                    return False, _path_error(
+                        f"wildcard prefix {prefix_path}: key {value!r} not found"
+                    )
                 node = node[value]
             elif kind == "index":
-                if not isinstance(node, list) or value >= len(node) or value < 0:
-                    return False, _path_error(f"wildcard prefix {prefix_path}: index [{value}] out of range")
-                node = node[value]
+                if not isinstance(node, list):
+                    return False, _path_error(
+                        f"wildcard prefix {prefix_path}: index [{value}] requires array"
+                    )
+                idx = value if value >= 0 else len(node) + value
+                if idx >= len(node) or idx < 0:
+                    return False, _path_error(
+                        f"wildcard prefix {prefix_path}: index [{value}] out of range; list length={len(node)}"
+                    )
+                node = node[idx]
             elif kind in ("script", "script_id"):
                 found, sub = _select_json_path(node, _tokens_to_path([(kind, value)]))
                 if not found:
@@ -386,7 +395,10 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                 found, sub = _select_json_path(elem, suffix_path)
                 if found:
                     results.append(sub)
-                # skip elements where suffix doesn't resolve
+                else:
+                    results.append(
+                        None
+                    )  # disclose suffix miss as null, never silently drop
             else:
                 results.append(elem)
         return True, results
@@ -1249,7 +1261,7 @@ def _gather_paths(args: argparse.Namespace) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — single-file CLI dispatch
     parser = _Parser(
         prog="inspect_sample.py",
         description="Bounded structure inspection of a captured response file.",
@@ -1390,6 +1402,9 @@ def main(argv: list[str] | None = None) -> int:
         if any(not keyword.strip() for keyword in args.grep):
             print("[inspect_sample] --grep needs a non-empty literal keyword")
             return 1
+        args.grep = list(
+            dict.fromkeys(k.lower() for k in args.grep)
+        )  # case-insensitive dedupe
         if args.xpath or args.attr is not None or args.text or args.html:
             print(
                 "[inspect_sample] --grep is its own channel; it cannot be combined with -p/-x/--attr/--text/--html"
@@ -1618,6 +1633,10 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 glob_root = os.path.dirname(patterns[0])
                 if args.value_only and paths:
+                    limit, limit_err = _parse_limit(args.limit, BATCH_VALUE_LIMIT)
+                    if limit_err:
+                        print(limit_err)
+                        return 1
                     vo_results: dict[str, Any] = {}
                     for fp in files:
                         rel = (
@@ -1634,14 +1653,33 @@ def main(argv: list[str] | None = None) -> int:
                             continue
                         if len(paths) == 1:
                             found, node = _select_json_path(sample, paths[0])
-                            vo_results[rel] = node if found else None
+                            vo_results[rel] = (
+                                (
+                                    _bounded_text(str(node), limit)
+                                    if isinstance(node, str)
+                                    else node
+                                )
+                                if found
+                                else None
+                            )
                         else:
                             file_data: dict[str, Any] = {}
                             for jp in paths:
                                 found, node = _select_json_path(sample, jp)
-                                file_data[jp] = node if found else None
+                                file_data[jp] = (
+                                    (
+                                        _bounded_text(str(node), limit)
+                                        if isinstance(node, str)
+                                        and len(str(node)) > limit
+                                        else node
+                                    )
+                                    if found
+                                    else None
+                                )
                             vo_results[rel] = file_data
-                    print(json.dumps(vo_results, ensure_ascii=False))
+                    print(
+                        json.dumps(_fit_output_budget(vo_results), ensure_ascii=False)
+                    )
                     return 0
                 if args.grep is not None:
                     grep_results = []
@@ -1768,6 +1806,20 @@ def main(argv: list[str] | None = None) -> int:
                         payload.update(truncated=True, truncation_reason="output_limit")
                         victims = [r for r in payload["results"] if r.get("shown")]
                         if not victims:
+                            if not payload["results"]:
+                                print(
+                                    json.dumps(
+                                        _fit_output_budget(
+                                            {
+                                                "error": "result metadata exceeds the output budget; use fewer paths or shorter paths",
+                                                "truncated": True,
+                                                "truncation_reason": "output_limit",
+                                            }
+                                        ),
+                                        ensure_ascii=False,
+                                    )
+                                )
+                                return 1
                             payload["results"].pop()
                             payload["shown"] = sum(
                                 1 for row in payload["results"] if row.get("shown")
@@ -1949,7 +2001,15 @@ def main(argv: list[str] | None = None) -> int:
                 vo: dict[str, Any] = {}
                 for jp in paths:
                     found, node = _select_json_path(sample, jp)
-                    vo[jp] = node if found else None
+                    vo[jp] = (
+                        (
+                            _bounded_text(node, limit)
+                            if isinstance(node, str) and len(node) > limit
+                            else node
+                        )
+                        if found
+                        else None
+                    )
                 print(json.dumps(_fit_output_budget(vo), ensure_ascii=False))
                 return 0
             if not paths:
@@ -1982,6 +2042,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except OSError as exc:
         print(f"[inspect_sample] cannot read {args.file}: {exc}")
+        return 1
+    except RecursionError:
+        print(
+            "[inspect_sample] JSON too deeply nested for this interpreter; use --keys or --grep to survey instead of descending"
+        )
         return 1
 
 

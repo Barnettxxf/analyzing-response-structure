@@ -14,7 +14,7 @@ description: >-
   field inventory. Skip for small config files.
 compatibility: Python 3.9+. Offline, read-only; XPath needs optional parsel.
 metadata:
-  version: "1.15.0"
+  version: "1.16.0"
   interpreter: python, python3, or py -3
 ---
 
