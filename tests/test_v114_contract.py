@@ -1051,9 +1051,9 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(res_zero.returncode, 0, res_zero.stdout + res_zero.stderr)
         self.assertNotIn("Traceback", res_zero.stdout + res_zero.stderr)
 
-    # --- v1.16.2: --files-file literal batch + describe default 900 ---------------
+    # --- v1.16.2: --list-file literal batch + describe default 900 ---------------
 
-    def test_read_files_file_literal_subset(self) -> None:
+    def test_read_list_file_literal_subset(self) -> None:
         batch = self.dir / "ff"
         batch.mkdir()
         for name in ("a.json", "b.json", "c.json"):
@@ -1062,17 +1062,17 @@ class V114ContractTests(unittest.TestCase):
         listfile.write_text(
             f"# subset\n{batch / 'a.json'}\n\n{batch / 'c.json'}\n", encoding="utf-8"
         )
-        res = run("read", "--files-file", str(listfile), "-p", "$.code")
+        res = run("read", "--list-file", str(listfile), "-p", "$.code")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         data = json.loads(res.stdout)
         names = [r["file"] for r in data["results"]]
         self.assertEqual(len(names), 2)
         self.assertTrue(all(n in ("a.json", "c.json") for n in names))
 
-    def test_read_files_file_missing_path_rejected(self) -> None:
+    def test_read_list_file_missing_path_rejected(self) -> None:
         listfile = self.dir / "bad.txt"
         listfile.write_text(str(self.dir / "nope.json"), encoding="utf-8")
-        res = run("read", "--files-file", str(listfile), "-p", "$.code")
+        res = run("read", "--list-file", str(listfile), "-p", "$.code")
         self.assertEqual(res.returncode, 1, res.stdout)
         self.assertIn("not found", res.stdout)
 

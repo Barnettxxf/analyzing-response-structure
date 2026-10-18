@@ -42,6 +42,8 @@ Python 3.9+ stdlib only; any interpreter (`python`, `python3`, `py -3`, user-spe
 
 ## Core Pattern
 
+0. **Acquire**: `--files '<glob>'` covers a whole directory pattern; for an arbitrary subset (e.g. the 10 confirmed detail captures, excluding stray listing pages a glob would sweep in), write the literal paths to a UTF-8 file (one per line, `#` comments allowed) and pass `--list-file list.txt` — one batch call over exactly the files you chose, no glob side-catch.
+
 1. **Map**: `describe` the file; scan `entries`; note `truncated` / `truncation_reason`.
 2. **Descend**: truncated, or need one region? `describe --json-path '<subtree>'`.
 3. **Slice**: `read --json-path` the first, a middle, and the LAST element (default 2000 chars covers most object slices); diff key sets and types — item[0]-only inventories are guesses. Many fields at once? `read -p '$.a' -p '$.b'` returns path+type+value for a whole list; many subtrees to map? `describe -p ...` does it in one call.

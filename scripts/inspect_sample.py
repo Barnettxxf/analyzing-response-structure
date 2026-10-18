@@ -1398,7 +1398,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         help="case-insensitive literal keyword search over the raw text view (bounded context hits; repeatable = merged multi-keyword hits; works with --files)",
     )
     p_read.add_argument(
-        "--files-file",
+        "--list-file",
         default=None,
         help="literal file paths, one per line (# comments/blanks skipped) — batch an arbitrary file subset without glob",
     )
@@ -1473,10 +1473,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
     if (
         not args.file
         and not getattr(args, "files", None)
-        and not getattr(args, "files_file", None)
+        and not getattr(args, "list_file", None)
     ):
         print(
-            "[inspect_sample] file is required (or use --files/--files-file for batch mode)"
+            "[inspect_sample] file is required (or use --files/--list-file for batch mode)"
         )
         return 1
     path = Path(args.file) if args.file else None
@@ -1619,32 +1619,32 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     "[inspect_sample] --attr/--text/--html extract from matched HTML elements — pair them with -x"
                 )
                 return 1
-            if getattr(args, "files", None) or getattr(args, "files_file", None):
+            if getattr(args, "files", None) or getattr(args, "list_file", None):
                 if legacy_batch:
                     print(
                         "[inspect_sample] batch mode (--files) is a plain `read` feature — batch aliases do not carry it"
                     )
                     return 1
-                if getattr(args, "files", None) and getattr(args, "files_file", None):
-                    print("[inspect_sample] use --files or --files-file, not both")
+                if getattr(args, "files", None) and getattr(args, "list_file", None):
+                    print("[inspect_sample] use --files or --list-file, not both")
                     return 1
                 paths = _gather_paths(args)
-                if getattr(args, "files_file", None):
+                if getattr(args, "list_file", None):
                     literal_files: list[str] = []
-                    with open(args.files_file, encoding="utf-8-sig") as fh:
+                    with open(args.list_file, encoding="utf-8-sig") as fh:
                         for line in fh:
                             line = line.strip()
                             if line and not line.startswith("#"):
                                 literal_files.append(line)
                     if not literal_files:
                         print(
-                            f"[inspect_sample] --files-file {args.files_file} contains no file paths"
+                            f"[inspect_sample] --files-file {args.list_file} contains no file paths"
                         )
                         return 1
                     missing = [p for p in literal_files if not os.path.isfile(p)]
                     if missing:
                         print(
-                            "[inspect_sample] --files-file paths not found: "
+                            "[inspect_sample] --list-file paths not found: "
                             + ", ".join(missing[:10])
                         )
                         return 1
@@ -1695,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                 patterns = (
                     patterns
                     if getattr(args, "files", None)
-                    else [f"--files-file {args.files_file}"]
+                    else [f"--files-file {args.list_file}"]
                 )
                 xpaths = [
                     x.strip()
