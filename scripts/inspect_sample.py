@@ -40,10 +40,12 @@ PAGINATION_KEY_RE = re.compile(
 PAGINATION_CANDIDATE_CAP = 20
 MAX_DIGEST_OUTPUT_CHARS = 24_000
 
-# Per-entry budget for describe maps. Default tuned from field feedback (v1.16
-# round: 3/4 arms hit the old 11000 default's truncation wall and asked for
-# per-path control; 900 lets 3-8 typical subtree paths fit one call).
-DIGEST_ENTRY_BUDGET = 900
+# Per-entry budget for describe maps. Default kept at the historical 11000: a
+# field rollback experiment (v1.16.2) showed a 900 default degraded a
+# describe-heavy agent (66-70/80 vs 80/80 on rollback). Per-path control is
+# still available opt-in via --limit (e.g. --limit 900 for wide multi-path
+# surveys that must fit one call).
+DIGEST_ENTRY_BUDGET = 11_000
 MAX_ENTRY_BUDGET = 11_000
 MAX_READ_SAMPLE_CHARS = 20_000
 DEFAULT_READ_LIMIT = 2000
