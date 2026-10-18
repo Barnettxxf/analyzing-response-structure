@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 IDENTIFIER_RE = re.compile(r"^[@A-Za-z_$][@A-Za-z0-9_$]*$")
+PREDICATE_RE = re.compile(r"\?([@A-Za-z_$][@A-Za-z0-9_$]*)=(.*)\Z", re.DOTALL)
 SCRIPT_MARKER = "#script["
 MAX_DIGEST_KEYS = 50
 MAX_DIGEST_ENTRIES = 200
@@ -233,7 +234,8 @@ def _path_string(raw: str) -> Any:
 
 
 def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
-    """Small path grammar: ``$``, ``.identifier``, ``[integer]``, ``[JSON-string]``, ``#script[n]``."""
+    """Small path grammar: ``$``, ``.identifier``, ``[integer]``, ``[JSON-string]``,
+    ``[?key=value]`` (unique-element predicate), ``.$len`` and ``#script[n]``."""
     if not isinstance(json_path, str) or not json_path.startswith("$"):
         return "path must start with $"
     if len(json_path) > 2048:
@@ -270,7 +272,10 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
             key = json_path[start:end]
             if not key or not IDENTIFIER_RE.fullmatch(key):
                 return f"invalid property segment: {json_path[start:end]!r}"
-            tokens.append(("key", key))
+            if key == "$len":
+                tokens.append(("len_op", None))
+            else:
+                tokens.append(("key", key))
             index = end
             continue
         if json_path[index] == "[":
@@ -278,6 +283,21 @@ def _tokenize_json_path(json_path: str) -> list[tuple[str, Any]] | str:
             if end < 0:
                 return "unclosed [] path segment"
             raw = json_path[index + 1 : end]
+            if raw.startswith("?"):
+                match = PREDICATE_RE.fullmatch(raw)
+                if match is None:
+                    return "[] predicate must be [?key=value] with an identifier key and a value"
+                pkey, pvalue = match.group(1), match.group(2)
+                if pvalue[:1] in ("'", '"'):
+                    decoded = _path_string(pvalue)
+                    if decoded is _PARSE_FAILED:
+                        return (
+                            "[] predicate value must be a quoted string or a bareword"
+                        )
+                    pvalue = decoded
+                tokens.append(("pred", (pkey, pvalue)))
+                index = end + 1
+                continue
             if raw == "*":
                 tokens.append(("wildcard", None))
             elif digit_index.fullmatch(raw):
@@ -320,6 +340,13 @@ def _bounded_json_text(value: Any, limit: int) -> str:
     return "".join(chunks)
 
 
+def _format_pred_value(value: str) -> str:
+    """Re-serialize a predicate value so it re-tokenizes to itself."""
+    if value == "" or "]" in value or value[0] in ("'", '"'):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 def _tokens_to_path(tokens: list[tuple[str, Any]]) -> str:
     """Reconstruct a human-readable path string from parsed tokens."""
     parts = ["$"]
@@ -337,6 +364,11 @@ def _tokens_to_path(tokens: list[tuple[str, Any]]) -> str:
             parts.append(f"#script[{value}]")
         elif kind == "script_id":
             parts.append(f'#script[id="{value}"]')
+        elif kind == "pred":
+            pkey, pvalue = value
+            parts.append(f"[?{pkey}={_format_pred_value(pvalue)}]")
+        elif kind == "len_op":
+            parts.append(".$len")
     return "".join(parts)
 
 
@@ -391,6 +423,10 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                 if not found:
                     return False, sub
                 node = sub
+            else:
+                return False, _path_error(
+                    f"wildcard prefix {prefix_path}: {kind} is not supported before [*]"
+                )
         if not isinstance(node, list):
             return False, _path_error(
                 f"{prefix_path} is not a list; wildcard [*] requires array (got {_json_type_name(node)})"
@@ -444,6 +480,46 @@ def _select_json_path(sample: Any, json_path: str) -> tuple[bool, Any]:
                 )
             node = node[idx]
             prefix += f"[{value}]"
+        elif kind == "pred":
+            pkey, pvalue = value
+            if not isinstance(node, list):
+                return False, _path_error(
+                    f"{prefix} is {_json_type_name(node)}, not a list; "
+                    f"[?{pkey}={pvalue}] filters array elements"
+                )
+            matches = [
+                el
+                for el in node
+                if isinstance(el, dict) and str(el.get(pkey)) == pvalue
+            ]
+            if len(matches) == 1:
+                node = matches[0]  # unique match: auto-unwrap, keep resolving
+                prefix += f"[?{pkey}={_format_pred_value(pvalue)}]"
+            elif not matches:
+                seen_values: list[str] = []
+                for el in node:
+                    if isinstance(el, dict) and pkey in el:
+                        text = str(el[pkey])[:64]
+                        if text not in seen_values:
+                            seen_values.append(text)
+                listing = ", ".join(seen_values[:10]) or "(none)"
+                return False, _path_error(
+                    f"{prefix}[?{pkey}={pvalue}] matched 0 elements; "
+                    f"available {pkey} values: {listing}"
+                )
+            else:
+                return False, _path_error(
+                    f"{prefix}: {len(matches)} matches for [?{pkey}={pvalue}]; "
+                    "narrow the predicate or append [0]"
+                )
+        elif kind == "len_op":
+            if not isinstance(node, (list, dict, str)):
+                return False, _path_error(
+                    f"{prefix} is {_json_type_name(node)}; "
+                    "$len needs a list, dict or string"
+                )
+            node = len(node)
+            prefix += ".$len"
         elif kind in ("script", "script_id"):
             if not isinstance(node, str) or not _looks_like_html(node):
                 return False, _path_error(
@@ -1281,6 +1357,72 @@ def _gather_paths(args: argparse.Namespace) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _collect_batch_files(
+    args: argparse.Namespace,
+) -> tuple[list[str], str | None, list[str]] | str:
+    """Shared --files/--list-file collection for `read` and `describe --scripts` batches.
+
+    Returns (files, glob_root, patterns) — glob-sorted, deduped, existing files
+    (after --exclude) — or a prefixed guidance line for the caller to print.
+    """
+    if getattr(args, "files", None) and getattr(args, "list_file", None):
+        return "[inspect_sample] use --files or --list-file, not both"
+    if getattr(args, "list_file", None):
+        literal_files: list[str] = []
+        with open(args.list_file, encoding="utf-8-sig") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    literal_files.append(line)
+        if not literal_files:
+            return (
+                f"[inspect_sample] --files-file {args.list_file} contains no file paths"
+            )
+        missing = [p for p in literal_files if not os.path.isfile(p)]
+        if missing:
+            return "[inspect_sample] --list-file paths not found: " + ", ".join(
+                missing[:10]
+            )
+        files = sorted({str(Path(f).resolve()) for f in literal_files})
+        glob_root = (
+            os.path.dirname(files[0]) if len(files) == 1 else os.path.commonpath(files)
+        )
+        return files, glob_root, [f"--files-file {args.list_file}"]
+    patterns = [pat for occ in (args.files or []) for pat in occ]
+    if not patterns:
+        return "[inspect_sample] batch mode needs at least one --files glob pattern"
+    files = sorted(
+        {
+            str(Path(f).resolve())
+            for pat in patterns
+            for f in glob.glob(pat)
+            if Path(f).is_file()
+        }
+    )
+    excludes = [
+        pat.strip()
+        for occ in (getattr(args, "exclude", None) or [])
+        for pat in (occ if isinstance(occ, list) else [occ])
+        if isinstance(pat, str) and pat.strip()
+    ]
+    if excludes:
+        files = [
+            f
+            for f in files
+            if not any(
+                fnmatch.fnmatch(os.path.basename(f), pat) or fnmatch.fnmatch(f, pat)
+                for pat in excludes
+            )
+        ]
+    if not files:
+        return (
+            f"[inspect_sample] no files remain after excludes: {', '.join(patterns)} | excluded by: {', '.join(excludes)}"
+            if excludes
+            else f"[inspect_sample] no files match: {', '.join(patterns)}"
+        )
+    return files, os.path.dirname(patterns[0]), patterns
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — single-file CLI dispatch
     parser = _Parser(
         prog="inspect_sample.py",
@@ -1292,7 +1434,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         aliases=["batch_describe"],
         help="bounded path->type->sample map: whole file, one subtree, a path list, or XPath over HTML",
     )
-    p_describe.add_argument("file", help="response file (JSON or HTML)")
+    p_describe.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="response file (JSON or HTML); omit only in --scripts --files batch mode",
+    )
     p_describe.add_argument(
         "-p",
         "--json-path",
@@ -1311,6 +1458,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         "--paths-file",
         default=None,
         help="text file with one json_path per line (# comments and blank lines allowed)",
+    )
+    p_describe.add_argument(
+        "--files",
+        action="append",
+        nargs="*",
+        default=[],
+        help="one or more glob patterns per occurrence; with --scripts: compact per-file script summaries",
+    )
+    p_describe.add_argument(
+        "--list-file",
+        default=None,
+        help="literal file paths, one per line (# comments/blanks skipped) — with --scripts: batch the listed files",
+    )
+    p_describe.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="with --files: exclude collected files whose name matches this pattern (repeatable)",
     )
     describe_modes = p_describe.add_mutually_exclusive_group()
     describe_modes.add_argument(
@@ -1487,9 +1652,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
         return 1
     try:
         if args.command in ("describe", "batch_describe"):
-            assert (
-                path is not None
-            )  # Only read accepts --files without a positional file.
             legacy_batch = args.command == "batch_describe"
             desc_budget = DIGEST_ENTRY_BUDGET
             if getattr(args, "limit", None) is not None and hasattr(args, "keys"):
@@ -1506,6 +1668,65 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     "[inspect_sample] --keys describes JSON object keys; use -p, not -x"
                 )
                 return 1
+            if getattr(args, "files", None) or getattr(args, "list_file", None):
+                if legacy_batch:
+                    print(
+                        "[inspect_sample] batch mode (--files) is a plain `describe` feature — batch aliases do not carry it"
+                    )
+                    return 1
+                if not getattr(args, "scripts", False):
+                    print(
+                        "[inspect_sample] describe --files/--list-file batch mode needs --scripts (compact per-file script summaries)"
+                    )
+                    return 1
+                if path is not None:
+                    print(
+                        "[inspect_sample] describe --scripts --files takes no positional file — pass only the glob or list"
+                    )
+                    return 1
+                collected = _collect_batch_files(args)
+                if isinstance(collected, str):
+                    print(collected)
+                    return 1
+                files, glob_root, _patterns = collected
+                script_rows: list[dict[str, Any]] = []
+                for fp in files:
+                    rel = os.path.relpath(fp, glob_root) if glob_root else Path(fp).name
+                    srow: dict[str, Any] = {"file": rel, "path": fp, "scripts": []}
+                    try:
+                        sample = _load_sample(fp)
+                    except OSError as exc:
+                        srow["error"] = _bounded_text(f"cannot read {fp}: {exc}", 200)
+                        script_rows.append(srow)
+                        continue
+                    if not (isinstance(sample, str) and _looks_like_html(sample)):
+                        srow["error"] = (
+                            "not HTML — --scripts enumerates embedded JSON <script> blocks in HTML captures"
+                        )
+                        script_rows.append(srow)
+                        continue
+                    srow["scripts"] = [
+                        {
+                            "index": index,
+                            "id": s["id"],
+                            "type": s["type"],
+                            "parse_ok": bool(s.get("ok")),
+                            "length": s["length"],
+                        }
+                        for index, s in enumerate(_embedded_json_scripts(sample))
+                    ]
+                    script_rows.append(srow)
+                payload = {
+                    "file_count": len(files),
+                    "shown": len(script_rows),
+                    "omitted": len(files) - len(script_rows),
+                    "results": script_rows,
+                }
+                print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+                return 0
+            assert (
+                path is not None
+            )  # Only read and describe --scripts accept --files without a positional file.
             if getattr(args, "scripts", False):
                 sample = _load_sample(path)
                 if not (isinstance(sample, str) and _looks_like_html(sample)):
@@ -1631,74 +1852,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     print("[inspect_sample] use --files or --list-file, not both")
                     return 1
                 paths = _gather_paths(args)
-                if getattr(args, "list_file", None):
-                    literal_files: list[str] = []
-                    with open(args.list_file, encoding="utf-8-sig") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if line and not line.startswith("#"):
-                                literal_files.append(line)
-                    if not literal_files:
-                        print(
-                            f"[inspect_sample] --files-file {args.list_file} contains no file paths"
-                        )
-                        return 1
-                    missing = [p for p in literal_files if not os.path.isfile(p)]
-                    if missing:
-                        print(
-                            "[inspect_sample] --list-file paths not found: "
-                            + ", ".join(missing[:10])
-                        )
-                        return 1
-                    files = sorted({str(Path(f).resolve()) for f in literal_files})
-                    if len(files) == 1:
-                        glob_root = os.path.dirname(files[0])
-                    else:
-                        glob_root = os.path.commonpath(files)
-                else:
-                    patterns = [pat for occ in (args.files or []) for pat in occ]
-                    if not patterns:
-                        print(
-                            "[inspect_sample] batch mode needs at least one --files glob pattern"
-                        )
-                        return 1
-                    files = sorted(
-                        {
-                            str(Path(f).resolve())
-                            for pat in patterns
-                            for f in glob.glob(pat)
-                            if Path(f).is_file()
-                        }
-                    )
-                    excludes = [
-                        pat.strip()
-                        for occ in (getattr(args, "exclude", None) or [])
-                        for pat in (occ if isinstance(occ, list) else [occ])
-                        if isinstance(pat, str) and pat.strip()
-                    ]
-                    if excludes:
-                        files = [
-                            f
-                            for f in files
-                            if not any(
-                                fnmatch.fnmatch(os.path.basename(f), pat)
-                                or fnmatch.fnmatch(f, pat)
-                                for pat in excludes
-                            )
-                        ]
-                    if not files:
-                        print(
-                            f"[inspect_sample] no files remain after excludes: {', '.join(patterns)} | excluded by: {', '.join(excludes)}"
-                            if excludes
-                            else f"[inspect_sample] no files match: {', '.join(patterns)}"
-                        )
-                        return 1
-                    glob_root = os.path.dirname(patterns[0])
-                patterns = (
-                    patterns
-                    if getattr(args, "files", None)
-                    else [f"--files-file {args.list_file}"]
-                )
+                collected = _collect_batch_files(args)
+                if isinstance(collected, str):
+                    print(collected)
+                    return 1
+                files, glob_root, patterns = collected
                 xpaths = [
                     x.strip()
                     for occ in (args.xpath or [])
@@ -1713,12 +1871,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                     return 1
                 if xpaths and paths:
                     print(
-                        "[inspect_sample] batch -x takes no -p container — one -x per call"
-                    )
-                    return 1
-                if len(xpaths) > 1:
-                    print(
-                        "[inspect_sample] batch -x is a single expression per call — use --files with one -x, or drop --files for grouped -x"
+                        "[inspect_sample] batch -x takes no -p container — extract the HTML strings first, then run -x per file"
                     )
                     return 1
                 if not xpaths and not paths and args.grep is None:
@@ -1809,6 +1962,101 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912 — singl
                 if limit_err:
                     print(limit_err)
                     return 1
+                if len(xpaths) > 1:
+                    # Grouped multi-expression batch: every file row carries one
+                    # values-only group per -x (same shape as the single-file
+                    # grouped -x channel), so counts stay per-expression.
+                    grouped_results: list[dict[str, Any]] = []
+                    for fp in files:
+                        rel = (
+                            os.path.relpath(fp, glob_root)
+                            if glob_root
+                            else Path(fp).name
+                        )
+                        grow: dict[str, Any] = {
+                            "file": rel,
+                            "path": fp,
+                            "ok": True,
+                            "groups": [],
+                        }
+                        try:
+                            sample = _load_sample(fp)
+                        except OSError as exc:
+                            grow.update(
+                                ok=False,
+                                error=_bounded_text(f"cannot read {fp}: {exc}", 400),
+                            )
+                            grouped_results.append(grow)
+                            continue
+                        root, err = _html_root(sample)
+                        if root is None and err is None:
+                            print(f"[inspect_sample] {_xpath_install_hint()}")
+                            return 1
+                        if err is not None:
+                            grow.update(
+                                ok=False, error=_bounded_text(err.get("error", ""), 300)
+                            )
+                        else:
+                            for xp in xpaths:
+                                result = _xpath_result(
+                                    root,
+                                    xp,
+                                    limit=limit,
+                                    show=show,
+                                    attr=args.attr,
+                                    html_mode=args.html,
+                                    values_only=True,
+                                )
+                                grow["groups"].append(
+                                    {"xpath": xp, "ok": "error" not in result, **result}
+                                )
+                        grouped_results.append(grow)
+                    payload = {
+                        "patterns": patterns,
+                        "file_count": len(files),
+                        "shown": len(grouped_results),
+                        "omitted": len(files) - len(grouped_results),
+                        "results": grouped_results,
+                    }
+                    while (
+                        len(json.dumps(payload, ensure_ascii=False)) > BATCH_TOTAL_CHARS
+                    ):
+                        payload.update(truncated=True, truncation_reason="output_limit")
+                        victims = [r for r in payload["results"] if r.get("groups")]
+                        if not victims:
+                            if not payload["results"]:
+                                print(
+                                    json.dumps(
+                                        _fit_output_budget(
+                                            {
+                                                "error": "result metadata exceeds the output budget; use fewer expressions or shorter paths",
+                                                "truncated": True,
+                                                "truncation_reason": "output_limit",
+                                            }
+                                        ),
+                                        ensure_ascii=False,
+                                    )
+                                )
+                                return 1
+                            payload["results"].pop()
+                            payload["shown"] = len(payload["results"])
+                            payload["omitted"] = len(files) - payload["shown"]
+                            continue
+                        row = victims[-1]
+                        group = row["groups"][-1]
+                        items = group.get("values")
+                        if items:
+                            items.pop()
+                            group.update(
+                                shown=len(items),
+                                omitted=group["count"] - len(items),
+                                truncated=True,
+                                truncation_reason="output_limit",
+                            )
+                        else:
+                            row["groups"].pop()
+                    print(json.dumps(_fit_output_budget(payload), ensure_ascii=False))
+                    return 0
                 results = []
                 shown = 0
                 type_summary: dict[str, int] = {}

@@ -1086,6 +1086,321 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertTrue(json.loads(res.stdout).get("truncated"))
 
+    # --- v1.17: batch multi -x grouped per-file rows --------------------------------
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_multi_x_returns_grouped_rows_per_file(self) -> None:
+        batch = self.dir / "groupx"
+        batch.mkdir()
+        for name in ("a.html", "b.html"):
+            (batch / name).write_text(HTML_PAGE, encoding="utf-8")
+        for extra in ((), ("--text",)):
+            with self.subTest(extra=extra):
+                res = run(
+                    "read",
+                    "--files",
+                    str(batch / "*.html"),
+                    "-x",
+                    "//a",
+                    "-x",
+                    "//h2",
+                    *extra,
+                )
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                data = json.loads(res.stdout)
+                self.assertEqual(data["file_count"], 2)
+                self.assertEqual(data["shown"], 2)
+                self.assertEqual(data["omitted"], 0)
+                self.assertEqual(
+                    [r["file"] for r in data["results"]], ["a.html", "b.html"]
+                )
+                for row in data["results"]:
+                    self.assertTrue(row["ok"])
+                    self.assertEqual(set(row), {"file", "path", "ok", "groups"})
+                    groups = {g["xpath"]: g for g in row["groups"]}
+                    self.assertEqual(groups["//a"]["count"], 2)
+                    self.assertEqual(groups["//a"]["values"], ["one", "two"])
+                    self.assertEqual(groups["//h2"]["count"], 2)
+                    self.assertEqual(groups["//h2"]["values"], ["Card A", "Card B"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_multi_x_show_limit_are_per_group(self) -> None:
+        res = run(
+            "read", "--files", str(self.html), "-x", "//li", "-x", "//h2", "--show", "2"
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        row = json.loads(res.stdout)["results"][0]
+        li, h2 = row["groups"]
+        self.assertEqual((li["count"], li["shown"], li["omitted"]), (3, 2, 1))
+        self.assertEqual(li["values"], ["$1", "$2"])
+        self.assertTrue(li["truncated"])  # match_limit disclosure per group
+        self.assertEqual((h2["count"], h2["shown"], h2["omitted"]), (2, 2, 0))
+        self.assertEqual(h2["values"], ["Card A", "Card B"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_multi_x_group_errors_stay_per_group(self) -> None:
+        res = run("read", "--files", str(self.html), "-x", "//a", "-x", "//a[@href=")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        row = json.loads(res.stdout)["results"][0]
+        self.assertTrue(row["ok"])
+        self.assertTrue(row["groups"][0]["ok"])
+        self.assertFalse(row["groups"][1]["ok"])
+        self.assertIn("XPath error", row["groups"][1]["error"])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_multi_x_non_html_file_is_row_level_error(self) -> None:
+        batch = self.dir / "mixx"
+        batch.mkdir()
+        (batch / "good.html").write_text(HTML_PAGE, encoding="utf-8")
+        (batch / "data.json").write_text(json.dumps({"not": "html"}), encoding="utf-8")
+        res = run("read", "--files", str(batch / "*"), "-x", "//a", "-x", "//h2")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rows = {r["file"]: r for r in json.loads(res.stdout)["results"]}
+        self.assertTrue(rows["good.html"]["ok"])
+        self.assertFalse(rows["data.json"]["ok"])
+        self.assertIn("error", rows["data.json"])
+        self.assertEqual(rows["data.json"]["groups"], [])
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_single_x_batch_row_stays_flat(self) -> None:
+        res = run("read", "--files", str(self.html), "-x", "//a", "--text")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        row = json.loads(res.stdout)["results"][0]
+        self.assertNotIn("groups", row)
+        self.assertEqual(row["count"], 2)
+        self.assertEqual(row["values"], ["one", "two"])
+
+    def test_read_files_multi_x_still_rejects_p_container(self) -> None:
+        res = run(
+            "read", "--files", str(self.html), "-x", "//a", "-x", "//h2", "-p", "$"
+        )
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("no -p container", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
+    def test_read_files_multi_x_metadata_overflow_is_guidance_exit1(self) -> None:
+        # In-process argv (no OS command-line length limit): patterns metadata
+        # alone must exceed the 80K batch budget after every row is trimmed.
+        spec = importlib.util.spec_from_file_location("inspector_groupx", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        getattr(spec.loader, "exec_module")(module)
+        argv = ["read"]
+        junk_root = self.dir.anchor  # same drive as the real file: relpath works
+        for i in range(220):
+            argv += [
+                "--files",
+                str(Path(junk_root) / ("x" * 400 + str(i)) / "none.html"),
+            ]
+        argv += ["--files", str(self.html), "-x", "//a", "-x", "//h2"]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = module.main(argv)
+        self.assertEqual(code, 1, output.getvalue())
+        data = json.loads(output.getvalue())
+        self.assertIn("output budget", data["error"])
+        self.assertEqual(data["truncation_reason"], "output_limit")
+
+    # --- v1.17: [?key=value] predicate + $len in the path grammar -------------------
+
+    def _write_attributes(self) -> Path:
+        source = self.dir / "attributes.json"
+        source.write_text(
+            json.dumps(
+                {
+                    "attributes": [
+                        {"label": "系列", "value": "A-series"},
+                        {"label": "颜色", "value": "black"},
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return source
+
+    def test_read_pred_unique_match_unwraps_element(self) -> None:
+        source = self._write_attributes()
+        for selector in (
+            "$.attributes[?label=系列].value",
+            '$.attributes[?label="系列"].value',
+        ):
+            with self.subTest(selector=selector):
+                res = run("read", str(source), "-p", selector)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(res.stdout.strip(), "A-series")
+        described = run("describe", str(source), "-p", "$.attributes[?label=系列]")
+        self.assertEqual(described.returncode, 0, described.stdout + described.stderr)
+        self.assertIn(
+            "$.attributes[?label=系列].value",
+            {e["path"] for e in json.loads(described.stdout)["entries"]},
+        )
+
+    def test_read_pred_zero_match_lists_available_values(self) -> None:
+        source = self._write_attributes()
+        res = run("read", str(source), "-p", "$.attributes[?label=尺码].value")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("available label values", res.stdout)
+        self.assertIn("系列", res.stdout)
+        self.assertIn("颜色", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_pred_multiple_matches_suggest_narrowing(self) -> None:
+        dup = self.dir / "dup.json"
+        dup.write_text(
+            json.dumps(
+                {
+                    "attributes": [
+                        {"label": "系列", "value": "one"},
+                        {"label": "系列", "value": "two"},
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        res = run("read", str(dup), "-p", "$.attributes[?label=系列].value")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("2 matches for [?label=系列]", res.stdout)
+        self.assertIn("append [0]", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_pred_on_non_list_is_guidance(self) -> None:
+        source = self.dir / "obj.json"
+        source.write_text(json.dumps({"attributes": {"label": "x"}}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.attributes[?label=x]")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("not a list", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_pred_malformed_is_guidance(self) -> None:
+        source = self._write_attributes()
+        for selector in (
+            "$.attributes[?label]",
+            "$.attributes[?=v]",
+            "$.attributes[?label='unterminated]",
+        ):
+            with self.subTest(selector=selector):
+                res = run("read", str(source), "-p", selector)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertIn("[json_path]", res.stdout)
+                self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    def test_read_len_operator_on_list_dict_and_root(self) -> None:
+        source = self.dir / "lens.json"
+        source.write_text(
+            json.dumps({"items": [1, 2, 3], "meta": {"a": 1, "b": 2}}), encoding="utf-8"
+        )
+        for selector, want in (
+            ("$.items.$len", "3"),
+            ("$.meta.$len", "2"),
+            ("$.$len", "2"),
+        ):
+            with self.subTest(selector=selector):
+                res = run("read", str(source), "-p", selector)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(res.stdout.strip(), want)
+
+    def test_read_len_on_scalar_is_guidance(self) -> None:
+        source = self.dir / "scalar.json"
+        source.write_text(json.dumps({"code": 0}), encoding="utf-8")
+        res = run("read", str(source), "-p", "$.code.$len")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("$len", res.stdout)
+        self.assertIn("integer", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
+    # --- v1.17: batch describe --scripts summary -------------------------------------
+
+    def _write_scripts_batch(self) -> Path:
+        batch = self.dir / "scriptsbatch"
+        batch.mkdir()
+        (batch / "a.html").write_text(
+            '<html><script id="app" type="application/json">{"n":1}</script>'
+            "<script>var x=1;</script></html>",
+            encoding="utf-8",
+        )
+        (batch / "b.html").write_text(
+            '<html><script type="application/ld+json">{"@type":"Product"}</script>'
+            "</html>",
+            encoding="utf-8",
+        )
+        return batch
+
+    def test_describe_scripts_files_batch_summary(self) -> None:
+        batch = self._write_scripts_batch()
+        res = run("describe", "--scripts", "--files", str(batch / "*.html"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(set(data), {"file_count", "shown", "omitted", "results"})
+        self.assertEqual(data["file_count"], 2)
+        self.assertEqual(data["shown"], 2)
+        self.assertEqual(data["omitted"], 0)
+        rows = {r["file"]: r for r in data["results"]}
+        self.assertEqual(set(rows["a.html"]), {"file", "path", "scripts"})
+        a = rows["a.html"]["scripts"]
+        self.assertEqual([s["index"] for s in a], [0, 1])
+        self.assertEqual(a[0]["id"], "app")
+        self.assertEqual(a[0]["type"], "application/json")
+        self.assertTrue(a[0]["parse_ok"])
+        self.assertIsInstance(a[0]["length"], int)
+        self.assertFalse(a[1]["parse_ok"])
+        self.assertNotIn("head", a[1])  # compact summary only — no raw heads
+        b = rows["b.html"]["scripts"]
+        self.assertEqual(b[0]["id"], None)
+        self.assertEqual(b[0]["type"], "application/ld+json")
+        self.assertTrue(b[0]["parse_ok"])
+
+    def test_describe_scripts_list_file_batch(self) -> None:
+        batch = self._write_scripts_batch()
+        listfile = self.dir / "subset.txt"
+        listfile.write_text(f"# pick one\n{batch / 'a.html'}\n", encoding="utf-8")
+        res = run("describe", "--scripts", "--list-file", str(listfile))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["file_count"], 1)
+        self.assertEqual(data["results"][0]["file"], "a.html")
+        self.assertEqual(data["results"][0]["scripts"][0]["id"], "app")
+
+    def test_describe_scripts_files_exclude(self) -> None:
+        batch = self._write_scripts_batch()
+        (batch / "skip.html").write_text(
+            '<html><script id="skip">{"n":9}</script></html>', encoding="utf-8"
+        )
+        res = run(
+            "describe",
+            "--scripts",
+            "--files",
+            str(batch / "*.html"),
+            "--exclude",
+            "skip.html",
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        data = json.loads(res.stdout)
+        self.assertEqual(data["file_count"], 2)
+        self.assertFalse(any("skip" in r["file"] for r in data["results"]))
+
+    def test_describe_scripts_batch_marks_non_html_files(self) -> None:
+        batch = self._write_scripts_batch()
+        (batch / "data.json").write_text(json.dumps({"not": "html"}), encoding="utf-8")
+        res = run("describe", "--scripts", "--files", str(batch / "*"))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rows = {r["file"]: r for r in json.loads(res.stdout)["results"]}
+        self.assertEqual(rows["data.json"]["scripts"], [])
+        self.assertIn("not HTML", rows["data.json"].get("error", ""))
+        self.assertEqual(rows["a.html"]["scripts"][0]["id"], "app")
+
+    def test_describe_files_batch_requires_scripts_flag(self) -> None:
+        batch = self._write_scripts_batch()
+        res = run("describe", "--files", str(batch / "*.html"))
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("--scripts", res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+        res = run("batch_describe", "--scripts", "--files", str(batch / "*.html"))
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertNotIn("Traceback", res.stdout + res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

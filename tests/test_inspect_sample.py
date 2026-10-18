@@ -806,11 +806,12 @@ class InspectSampleTests(unittest.TestCase):
         self.assertEqual(by_file["a.html"]["value"], 3)
         self.assertEqual(by_file["b.html"]["value"], 1)
 
-    @unittest.skipUnless(HAVE_PARSEL, "parsel not installed")
-    def test_read_batch_x_rejects_multiple_expressions(self):
-        res = run("read", "--files", str(self.html_page), "-x", "//a", "-x", "//b")
+    def test_read_batch_x_takes_no_p_container(self):
+        # v1.17: repeated -x in --files mode groups per expression; the container
+        # mix-in stays rejected — extract HTML strings first, then run -x per file.
+        res = run("read", "--files", str(self.html_page), "-x", "//a", "-p", "$.x")
         self.assertEqual(res.returncode, 1)
-        self.assertIn("single expression", res.stdout)
+        self.assertIn("no -p container", res.stdout)
 
     # --- v1.14.0: script-by-id, @-prefixed keys, --attr fix -----------------------
 
