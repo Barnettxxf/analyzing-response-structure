@@ -9,6 +9,7 @@ import json
 import tempfile
 import unittest
 from html import escape
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1000,12 +1001,38 @@ class V114ContractTests(unittest.TestCase):
         self.assertEqual(data, ["a", None, "c"])
 
     def test_read_recursion_error_is_guidance(self) -> None:
+        # Exercise our exception boundary deterministically; the depth at which
+        # a real JSON decoder raises differs across CPython builds/platforms.
+        spec = importlib.util.spec_from_file_location("inspect_recursion_test", SCRIPT)
+        assert spec is not None and isinstance(spec.loader, SourceFileLoader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = self.dir / "source.json"
+        source.write_text("{}", encoding="utf-8")
+        for command in ("read", "describe"):
+            with self.subTest(command=command):
+                output = io.StringIO()
+                with (
+                    patch.object(module, "_load_sample", side_effect=RecursionError),
+                    contextlib.redirect_stdout(output),
+                ):
+                    code = module.main([command, str(source), "-p", "$"])
+                self.assertEqual(code, 1)
+                self.assertIn("deeply nested", output.getvalue())
+                self.assertNotIn("Traceback", output.getvalue())
+
+    def test_deep_json_is_bounded_or_reports_depth_guidance(self) -> None:
         source = self.dir / "deep.json"
         source.write_text("[" * 6000 + "]" * 6000, encoding="utf-8")
         res = run("read", str(source), "-p", "$")
-        self.assertEqual(res.returncode, 1, res.stdout[:100] + res.stderr[:100])
         self.assertNotIn("Traceback", res.stdout + res.stderr)
-        self.assertIn("deeply nested", res.stdout + res.stderr)
+        self.assertLessEqual(len(res.stdout.rstrip("\r\n")), 20000)
+        if res.returncode == 1:
+            self.assertIn("deeply nested", res.stdout + res.stderr)
+        else:
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue(res.stdout.startswith("["))
+            self.assertIn("[truncated]", res.stdout)
 
     # --- v1.16.1: describe per-path budget (--limit) ------------------------------
 

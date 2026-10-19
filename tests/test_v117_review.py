@@ -510,7 +510,7 @@ class V117ReviewTests(unittest.TestCase):
     # --- F6: cross-drive --list-file batches ---------------------------------------
 
     @staticmethod
-    def _second_drive_anchor(anchor: Path) -> Path | None:
+    def _second_drive_anchor(anchor: str) -> Path | None:
         for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
             root = Path(f"{letter}:/")
             if root.is_dir() and root.drive.lower() != Path(anchor).drive.lower():
