@@ -211,6 +211,76 @@ class Issue2OutputTests(unittest.TestCase):
         self.assertEqual(payload["__compact__"]["shown"], 4)
         self.assertEqual(payload["__compact__"]["omitted"], 1)
 
+    def test_compact_batch_path_map_keeps_small_siblings_when_over_budget(self) -> None:
+        src = self.source(
+            "pack-batch.json",
+            {**{f"big{i}": "x" * 20000 for i in range(4)}, "ok": True},
+        )
+        for order in (
+            ("$.big0", "$.big1", "$.big2", "$.big3", "$.ok"),
+            ("$.ok", "$.big0", "$.big1", "$.big2", "$.big3"),
+        ):
+            with self.subTest(order=order):
+                result = run(
+                    "read",
+                    "--files",
+                    str(src),
+                    "-p",
+                    *order,
+                    "--value-only",
+                    "--limit",
+                    "20000",
+                )
+                self.assertEqual(
+                    result.returncode, 0, result.stdout[:300] + result.stderr
+                )
+                payload = json.loads(result.stdout)
+                self.assertIn("pack-batch.json", payload)
+                row = payload["pack-batch.json"]
+                self.assertIn("$.ok", row)
+                self.assertIs(row["$.ok"], True)
+                self.assertEqual(row["__compact__"]["count"], 5)
+                self.assertEqual(row["__compact__"]["shown"], 4)
+                self.assertEqual(row["__compact__"]["omitted"], 1)
+                self.assertLessEqual(len(result.stdout.rstrip("\r\n")), 80000)
+
+    def test_compact_batch_path_maps_share_budget_without_guessing_file_keys(
+        self,
+    ) -> None:
+        for name in ("__compact__", "results"):
+            self.source(
+                f"nested/{name}",
+                {**{f"big{i}": "x" * 20000 for i in range(4)}, "ok": True},
+            )
+        result = run(
+            "read",
+            "--files",
+            str(self.dir / "nested/*"),
+            "-p",
+            "$.big0",
+            "$.big1",
+            "$.big2",
+            "$.big3",
+            "$.ok",
+            "--value-only",
+            "--limit",
+            "20000",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout[:300] + result.stderr)
+        payload = json.loads(result.stdout)
+        for name in ("__compact__", "results"):
+            self.assertIn(name, payload)
+            row = payload[name]
+            self.assertIn("$.ok", row)
+            self.assertIs(row["$.ok"], True)
+            shown = len([p for p in row if p.startswith("$")])
+            self.assertEqual(row["__compact__"]["shown"], shown)
+            self.assertEqual(row["__compact__"]["omitted"], 5 - shown)
+        self.assertEqual(payload["__compact__#1"]["count"], 2)
+        self.assertEqual(payload["__compact__#1"]["shown"], 2)
+        self.assertEqual(payload["__compact__#1"]["omitted"], 0)
+        self.assertLessEqual(len(result.stdout.rstrip("\r\n")), 80000)
+
     def test_compact_batch_large_container_is_bounded(self) -> None:
         src = self.source("large.json", {"obj": {"blob": "x" * 100000}})
         result = run(

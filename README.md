@@ -81,7 +81,7 @@ parsing; HTML-in-JSON uses a container path plus XPath.
 python -m unittest discover -s tests
 ```
 
-254 behavioral regression cases at this revision. XPath cases skip explicitly
+256 behavioral regression cases at this revision. XPath cases skip explicitly
 when `parsel` is absent; dependency guidance is exercised on an interpreter
 without it. Tests spawn the real CLI and assert values, exit codes, coverage
 metadata and output budgets. Synthetic fixtures stay small and portable;
@@ -94,7 +94,7 @@ v1.17.1: fixes issue #2 — canonical batch source identity; per-value and total
 compact-output limits without reserved-filename collisions; composable
 predicate/index/wildcard paths and reserved-key round trips; honest post-trim
 coverage; original-text Unicode grep spans; script discovery in HTML fragments.
-The 254-test suite includes portable depth-error checks. Existing defaults stay
+The 256-test suite includes portable depth-error checks. Existing defaults stay
 unchanged; macOS execution is not claimed by Windows-only verification.
 
 v1.17.0: everything in v1.16 — plus batch multi-`-x` grouped rows,

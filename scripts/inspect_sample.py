@@ -1369,9 +1369,13 @@ def _free_metadata_key(payload: dict[str, Any], name: str) -> str:
 
 
 def _fit_compact_budget(
-    values: dict[str, Any], *, hint: str | None = None, budget: int = BATCH_TOTAL_CHARS
+    values: dict[str, Any],
+    *,
+    hint: str | None = None,
+    budget: int = BATCH_TOTAL_CHARS,
+    path_maps: set[str] | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """Pack data maps without guessing that user keys are envelope fields."""
+    """Pack known file/path maps without interpreting arbitrary data keys."""
     payload = dict(values)
     if hint:
         payload[_free_metadata_key(payload, "__hint__")] = _bounded_text(hint, 600)
@@ -1399,8 +1403,22 @@ def _fit_compact_budget(
         }, 1
     shown = 0
     for key, value in values.items():
-        packed[key] = value
         coverage.update(shown=shown + 1, omitted=total - shown - 1)
+        if path_maps is not None and key in path_maps:
+            # The caller explicitly identifies successful multi-path rows.
+            # Fit their path entries into the remaining encoded slot rather
+            # than treating the whole file as one indivisible value. No shape
+            # or reserved-name guesses are made about captured data objects.
+            packed[key] = {}
+            slot_budget = budget - len(json.dumps(packed, ensure_ascii=False)) + 2
+            nested, code = _fit_compact_budget(value, budget=slot_budget)
+            if code:
+                packed.pop(key)
+                coverage.update(shown=shown, omitted=total - shown)
+                continue
+            packed[key] = nested
+        else:
+            packed[key] = value
         if len(json.dumps(packed, ensure_ascii=False)) <= budget:
             shown += 1
         else:
@@ -1429,6 +1447,7 @@ def _read_compact_batch(
     limit: int,
 ) -> tuple[dict[str, Any], int]:
     values: dict[str, Any] = {}
+    path_maps: set[str] = set()
     all_missed_html = bool(files)
     for file in files:
         label = _display_rel(file, root)
@@ -1445,6 +1464,8 @@ def _read_compact_batch(
             continue
         selected, found = _compact_paths(sample, paths, effective_paths, limit)
         values[label] = selected[paths[0]] if len(paths) == 1 else selected
+        if len(paths) > 1:
+            path_maps.add(label)
         if found or not (isinstance(sample, str) and _looks_like_html(sample)):
             all_missed_html = False
     hint = (
@@ -1454,7 +1475,7 @@ def _read_compact_batch(
         if all_missed_html
         else None
     )
-    return _fit_compact_budget(values, hint=hint)
+    return _fit_compact_budget(values, hint=hint, path_maps=path_maps)
 
 
 def _refresh_clipped_values(row: dict[str, Any], length: int) -> None:
