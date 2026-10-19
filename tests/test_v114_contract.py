@@ -1263,7 +1263,8 @@ class V114ContractTests(unittest.TestCase):
         res = run("read", str(dup), "-p", "$.attributes[?label=系列].value")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("2 matches for [?label=系列]", res.stdout)
-        self.assertIn("append [0]", res.stdout)
+        self.assertIn("use a stricter predicate", res.stdout)
+        self.assertIn("append [0] to select one", res.stdout)
         self.assertNotIn("Traceback", res.stdout + res.stderr)
 
     def test_read_pred_on_non_list_is_guidance(self) -> None:

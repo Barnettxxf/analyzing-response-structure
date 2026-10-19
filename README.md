@@ -81,7 +81,7 @@ parsing; HTML-in-JSON uses a container path plus XPath.
 python -m unittest discover -s tests
 ```
 
-154 behavioral regression cases at this revision. XPath cases skip explicitly
+213 behavioral regression cases at this revision. XPath cases skip explicitly
 when `parsel` is absent; dependency guidance is exercised on an interpreter
 without it. Tests spawn the real CLI and assert values, exit codes, coverage
 metadata and output budgets. Synthetic fixtures stay small and portable;
@@ -89,6 +89,12 @@ external real-capture field tests are reported separately, not treated as gold
 truth merely because two model outputs agree.
 
 ## Version
+
+v1.17.0: everything in v1.16 — plus batch multi-`-x` grouped rows,
+`[?key=value]` predicates with `[0]`/`[-1]` selection and `.$len`,
+batch `describe --scripts` summaries, the `$#script[type="..."]` selector,
+and `read --json-root` re-rooting for single-file and batch `$`-paths.
+213 tests at this revision.
 
 v1.16.0: everything in v1.15 — stable script-ID paths, quoted special keys,
 safe attribute extraction, grouped XPath, keys-only maps, HTML structure
